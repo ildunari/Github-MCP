@@ -1,0 +1,46 @@
+{
+  "name": "github-mcp-server-kosta",
+  "version": "1.0.1",
+  "description": "MCP server for GitHub repository operations with CLI token support",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "github-mcp-server-kosta": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --inspect src/index.js",
+    "test": "node src/index.js --github-token test-token --help"
+  },
+  "keywords": [
+    "mcp",
+    "github",
+    "model-context-protocol",
+    "ai-tools",
+    "github-api",
+    "cli"
+  ],
+  "author": "Kosta Milovanovic",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0",
+    "node-fetch": "^3.3.2",
+    "yargs": "^17.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kostamilovanovic/github-mcp-server-kosta.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kostamilovanovic/github-mcp-server-kosta/issues"
+  },
+  "homepage": "https://github.com/kostamilovanovic/github-mcp-server-kosta#readme",
+  "files": [
+    "src/",
+    "README.md",
+    "package.json"
+  ]
+}
