@@ -70,9 +70,9 @@ echo "📤 Publishing to npm..."
 npm publish
 
 if [ $? -eq 0 ]; then
-    echo "🎉 Successfully published github-mcp-server-kosta@$NEW_VERSION!"
-    echo "📦 Users can now run: npx github-mcp-server-kosta"
-    echo "🔗 Package URL: https://www.npmjs.com/package/github-mcp-server-kosta"
+    echo "🎉 Successfully published @ildunari/github-mcp-server@$NEW_VERSION!"
+    echo "📦 Users can now run: npx @ildunari/github-mcp-server"
+    echo "🔗 Package URL: https://www.npmjs.com/package/@ildunari/github-mcp-server"
 else
     echo "❌ Publication failed"
     exit 1

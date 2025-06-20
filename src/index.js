@@ -29,11 +29,11 @@ const argv = yargs(hideBin(process.argv))
   .help()
   .alias('help', 'h')
   .example(
-    'npx github-mcp-server-kosta --github-token ghp_your_token_here',
+    'npx @ildunari/github-mcp-server --github-token ghp_your_token_here',
     'Run the GitHub MCP server with your access token'
   )
   .example(
-    'npx github-mcp-server-kosta -t $GITHUB_TOKEN',
+    'npx @ildunari/github-mcp-server -t $GITHUB_TOKEN',
     'Run with token from environment variable'
   )
   .parse();
@@ -197,7 +197,7 @@ function buildReadmeUrl(owner, repo, ref) {
 // MCP Server Setup
 const server = new Server(
   {
-    name: 'github-mcp-server-kosta',
+    name: '@ildunari/github-mcp-server',
     version: '1.0.0',
   },
   {

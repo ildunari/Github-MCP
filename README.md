@@ -1,4 +1,4 @@
-# GitHub MCP Server (Kosta's Version)
+# GitHub MCP Server
 
 A Model Context Protocol (MCP) server that provides comprehensive GitHub repository operations through a simple CLI interface.
 
@@ -19,18 +19,18 @@ A Model Context Protocol (MCP) server that provides comprehensive GitHub reposit
 
 ```bash
 # Run directly with npx (no installation needed)
-npx github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
+npx @ildunari/github-mcp-server --github-token YOUR_GITHUB_TOKEN
 
 # Or use environment variable
 export GITHUB_TOKEN=your_token_here
-npx github-mcp-server-kosta --github-token $GITHUB_TOKEN
+npx @ildunari/github-mcp-server --github-token $GITHUB_TOKEN
 ```
 
 ### Global Installation
 
 ```bash
-npm install -g github-mcp-server-kosta
-github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
+npm install -g @ildunari/github-mcp-server
+@ildunari/github-mcp-server --github-token YOUR_GITHUB_TOKEN
 ```
 
 ## GitHub Token Setup
@@ -43,7 +43,7 @@ github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
 
 3. Use the token with the CLI:
 ```bash
-npx github-mcp-server-kosta --github-token ghp_your_token_here
+npx @ildunari/github-mcp-server --github-token ghp_your_token_here
 ```
 
 ## Available Tools
@@ -79,7 +79,7 @@ Options:
 ### Basic Usage
 ```bash
 # Start the MCP server
-npx github-mcp-server-kosta --github-token YOUR_TOKEN
+npx @ildunari/github-mcp-server --github-token YOUR_TOKEN
 
 # The server will run on stdio and accept MCP requests
 ```
@@ -87,7 +87,7 @@ npx github-mcp-server-kosta --github-token YOUR_TOKEN
 ### With Custom Rate Limiting
 ```bash
 # Slower rate limiting (500ms between requests)
-npx github-mcp-server-kosta --github-token YOUR_TOKEN --rate-limit 500
+npx @ildunari/github-mcp-server --github-token YOUR_TOKEN --rate-limit 500
 ```
 
 ### MCP Client Configuration
@@ -99,7 +99,7 @@ For use with Claude Desktop or other MCP clients:
   "mcpServers": {
     "github": {
       "command": "npx",
-      "args": ["github-mcp-server-kosta", "--github-token", "YOUR_GITHUB_TOKEN"]
+      "args": ["@ildunari/github-mcp-server", "--github-token", "YOUR_GITHUB_TOKEN"]
     }
   }
 }
@@ -137,7 +137,7 @@ MIT License
 
 ## Author
 
-Kosta Milovanovic
+ildunari
 
 ## Contributing
 
