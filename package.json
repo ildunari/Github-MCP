@@ -1,11 +1,11 @@
 {
-  "name": "@ildunari/github-mcp-server",
-  "version": "1.0.1",
+  "name": "github-mcp-server-kosta",
+  "version": "2.0.0",
   "description": "MCP server for GitHub repository operations with CLI token support",
   "main": "src/index.js",
   "type": "module",
   "bin": {
-    "github-mcp-server": "src/index.js"
+    "github-mcp-server-kosta": "src/index.js"
   },
   "scripts": {
     "start": "node src/index.js",
@@ -23,7 +23,7 @@
   "author": "ildunari",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "node-fetch": "^3.3.2",
     "yargs": "^17.7.2"
   },
