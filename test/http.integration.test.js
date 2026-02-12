@@ -1,0 +1,152 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+function toolTextJson(result) {
+  assert.ok(result);
+  assert.ok(Array.isArray(result.content));
+  assert.equal(result.content[0]?.type, 'text');
+  return JSON.parse(result.content[0].text);
+}
+
+async function startServer(args) {
+  const proc = spawn('node', ['src/index.js', ...args], {
+    env: {
+      ...process.env,
+      GITHUB_TOKEN: 'dummy',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+
+  let stderr = '';
+  let url;
+
+  const ready = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Timed out waiting for server to listen. stderr:\n${stderr}`));
+    }, 10_000);
+
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      const m = stderr.match(/MCP HTTP listening on (https?:\/\/[^\s]+)/);
+      if (m && m[1]) {
+        url = m[1];
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    proc.on('exit', (code) => {
+      if (url) return;
+      clearTimeout(timeout);
+      reject(new Error(`Server exited early with code ${code}. stderr:\n${stderr}`));
+    });
+  });
+
+  await ready;
+  return { proc, url: new URL(url), getStderr: () => stderr };
+}
+
+async function stopServer(proc) {
+  if (!proc || proc.killed) return;
+  proc.kill('SIGTERM');
+  await new Promise((resolve) => {
+    const t = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      resolve();
+    }, 5000);
+    proc.on('exit', () => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+}
+
+async function withHttpClient(serverArgs, fn) {
+  const { proc, url } = await startServer(serverArgs);
+  const transport = new StreamableHTTPClientTransport(url);
+  const client = new Client({ name: 'github-mcp-server-http-test-client', version: '0.0.0' }, {});
+
+  try {
+    await client.connect(transport);
+    await fn(client, transport);
+  } finally {
+    try {
+      await transport.terminateSession();
+    } catch {
+      // ignore
+    }
+    try {
+      await client.close();
+    } catch {
+      // ignore
+    }
+    try {
+      await transport.close();
+    } catch {
+      // ignore
+    }
+    await stopServer(proc);
+  }
+}
+
+test('http: full tool list includes rest escape hatch', async () => {
+  await withHttpClient(
+    ['--transport', 'http', '--http-port', '0', '--tool-mode', 'full', '--tool-schema-verbosity', 'compact', '--idle-timeout-ms', '0', '--rate-limit', '0'],
+    async (client) => {
+      const tools = await client.listTools({});
+      const toolNames = new Set((tools.tools || []).map(t => t.name));
+      assert.ok(toolNames.has('github_rest_mutate'));
+      assert.ok(toolNames.has('github_tool_groups_load'));
+    }
+  );
+});
+
+test('http: lazy tool list starts small and expands after loading groups', async () => {
+  await withHttpClient(
+    [
+      '--transport', 'http',
+      '--http-port', '0',
+      '--tool-mode', 'lazy',
+      '--preload-groups', 'core,search',
+      '--tool-schema-verbosity', 'compact',
+      '--idle-timeout-ms', '0',
+      '--rate-limit', '0',
+    ],
+    async (client) => {
+      {
+        const tools = await client.listTools({});
+        const toolNames = new Set((tools.tools || []).map(t => t.name));
+        assert.ok(toolNames.has('github_tool_groups_list'));
+        assert.ok(!toolNames.has('github_rest_mutate'));
+      }
+
+      {
+        const result = await client.callTool({
+          name: 'github_tool_groups_load',
+          arguments: { groups: ['issues'] },
+        });
+        const parsed = toolTextJson(result);
+        assert.ok(Array.isArray(parsed.loaded));
+      }
+
+      {
+        const tools = await client.listTools({});
+        const toolNames = new Set((tools.tools || []).map(t => t.name));
+        assert.ok(toolNames.has('github_update_issue'));
+      }
+    }
+  );
+});

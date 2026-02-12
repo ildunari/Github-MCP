@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server providing comprehensive GitHub repository operations — read and write — through a simple CLI interface. Built for Claude Desktop and other MCP clients.
 
-**v2.1.0** — Adds optional lazy tool loading (tool groups + `notifications/tools/list_changed`) to reduce context usage, expands write coverage (PR create/update/merge, issue updates, labels, file delete), and adds guarded generic REST tools (`github_rest_get`, `github_rest_mutate`).
+**v2.2.0** — Adds optional native Streamable HTTP transport (single `/mcp` endpoint with GET/POST/DELETE), plus optional structured tool output (`structuredContent`) and `outputSchema` for better MCP 2025-11-25 alignment.
 
 ## Features
 
@@ -30,6 +30,9 @@ MCP_IDLE_TIMEOUT_MS=0 GITHUB_TOKEN=your_token_here npx github-mcp-server-kosta
 
 # Not recommended (token is visible via `ps` on the machine):
 npx github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
+
+# Streamable HTTP mode (native /mcp endpoint)
+GITHUB_TOKEN=your_token_here npx github-mcp-server-kosta --transport http --http-port 3000
 ```
 
 ### Global Installation
@@ -143,11 +146,23 @@ For Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.
 ```
 Options:
   -t, --github-token     GitHub access token for API requests (or set GITHUB_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN)
+      --transport        Transport mode: stdio|http [default: stdio]
       --tool-mode        Tool listing mode: "full" or "lazy" [default: full]
       --preload-groups   Comma-separated tool group IDs to preload in lazy mode [default: core,search in lazy]
       --tool-schema-verbosity  Tool schema verbosity: "full" or "compact" [default: full]
+      --tool-output      Tool output: text|structured|both [default: text]
+      --tool-output-schema  Tool output schema: none|bootstrap|all_loose [default: none]
       --idle-timeout-ms  Exit after this many ms without receiving an MCP request (0 disables). [default: 300000]
   -r, --rate-limit       Rate limit delay in ms between requests [default: 100]
+      --http-host        HTTP bind host (http transport) [default: 127.0.0.1]
+      --http-port        HTTP bind port (http transport; 0 chooses ephemeral) [default: 3000]
+      --http-path        MCP endpoint path (http transport) [default: /mcp]
+      --http-tls-key     TLS private key path (enables https when paired with --http-tls-cert)
+      --http-tls-cert    TLS cert path (enables https when paired with --http-tls-key)
+      --http-auth-token  Optional Bearer token required to access /mcp
+      --http-allowed-origins  Comma-separated Origin allowlist (enforced only when Origin header is present)
+      --http-allowed-hosts    Comma-separated Host allowlist (recommended when binding 0.0.0.0/::)
+      --http-max-sessions     Maximum concurrent MCP sessions (DoS guard) [default: 50]
   -h, --help             Show help
 ```
 
@@ -156,6 +171,12 @@ Options:
 - In `--tool-mode lazy`, the server only exposes bootstrap tools plus any preloaded groups (default: `core,search`).
 - Load additional groups at runtime using `github_tool_groups_load` (e.g., `issues`, `pulls`, `rest`).
 - The server advertises `tools.listChanged: true` and emits `notifications/tools/list_changed` after loading groups, but some MCP clients may not auto-refresh tool lists. If your client does not, call `tools/list` again (or restart the session).
+
+## Streamable HTTP (`/mcp`) Notes
+
+- `--transport http` exposes a single MCP endpoint (default `http://127.0.0.1:3000/mcp`) supporting `GET`, `POST`, and `DELETE`.
+- By default the server binds to `127.0.0.1` for safety. If you bind to `0.0.0.0` or another interface, you should set `--http-auth-token` and strongly consider `--http-allowed-hosts` and `--http-allowed-origins`.
+- In HTTP mode, lazy tool loading state is session-isolated: each `Mcp-Session-Id` gets its own tool-group load state.
 
 ## Response Formats
 
