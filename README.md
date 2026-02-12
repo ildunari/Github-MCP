@@ -164,6 +164,10 @@ Options:
       --http-allowed-hosts    Comma-separated Host allowlist (recommended when binding 0.0.0.0/::)
       --http-max-sessions     Maximum concurrent MCP sessions (DoS guard) [default: 50]
       --http-require-auth-on-public-bind  Refuse startup if binding non-localhost without --http-auth-token [default: false]
+      --http-oauth-resource-metadata-url  Optional URL to advertise in WWW-Authenticate as resource_metadata
+      --http-oauth-protected-resource-path  Optional local path to serve OAuth protected resource metadata JSON
+      --http-oauth-authorization-server-issuer  Optional authorization server issuer included in metadata
+      --http-oauth-scopes  Comma-separated scopes_supported included in metadata
   -h, --help             Show help
 ```
 
@@ -205,6 +209,35 @@ See operational docs:
 Smoke scripts:
 - `scripts/smoke/remote-mcp-smoke.sh`
 - `scripts/smoke/edge-header-check.sh`
+
+### OAuth Scaffolding (Phase 2 Prep)
+
+This server now supports optional OAuth discovery/challenge scaffolding for staged rollout:
+
+- `--http-oauth-resource-metadata-url`: when unauthenticated requests are rejected (`401`), `WWW-Authenticate` includes:
+  - `Bearer resource_metadata="..."`
+- `--http-oauth-protected-resource-path`: serves a local OAuth Protected Resource Metadata JSON document.
+- `--http-oauth-authorization-server-issuer`: adds `authorization_servers` to the metadata JSON.
+- `--http-oauth-scopes`: adds `scopes_supported` to the metadata JSON.
+
+Example:
+
+```bash
+npx github-mcp-server-kosta \
+  --transport http \
+  --http-host 127.0.0.1 \
+  --http-port 3000 \
+  --http-path /mcp \
+  --http-auth-token "$MCP_BEARER_TOKEN" \
+  --http-oauth-resource-metadata-url "https://connector.example.com/.well-known/oauth-protected-resource" \
+  --http-oauth-protected-resource-path "/.well-known/oauth-protected-resource" \
+  --http-oauth-authorization-server-issuer "https://auth.example.com" \
+  --http-oauth-scopes "mcp.read,mcp.write"
+```
+
+Important:
+- This is scaffolding for phased rollout, not a complete OAuth authorization server implementation.
+- In production Claude.ai connector deployments, the recommended pattern is still edge/gateway-owned OAuth.
 
 ### Plain-English Security Guidance
 

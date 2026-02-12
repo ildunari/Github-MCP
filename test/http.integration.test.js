@@ -253,3 +253,46 @@ test('http: enforces origin allowlist when configured', async () => {
     await stopServer(proc);
   }
 });
+
+test('http oauth scaffold: serves protected resource metadata document', async () => {
+  const { proc, url } = await startServer([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-oauth-protected-resource-path', '/.well-known/oauth-protected-resource',
+    '--http-oauth-authorization-server-issuer', 'https://auth.example.com',
+    '--http-oauth-scopes', 'mcp.read,mcp.write',
+    '--idle-timeout-ms', '0',
+  ]);
+  try {
+    const resp = await fetch(new URL('/.well-known/oauth-protected-resource', url));
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(body.resource, url.toString());
+    assert.ok(Array.isArray(body.authorization_servers));
+    assert.ok(body.authorization_servers.includes('https://auth.example.com'));
+    assert.ok(Array.isArray(body.scopes_supported));
+    assert.ok(body.scopes_supported.includes('mcp.read'));
+  } finally {
+    await stopServer(proc);
+  }
+});
+
+test('http oauth scaffold: unauthorized challenge advertises resource metadata URL', async () => {
+  const { proc, url } = await startServer([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-auth-token', 'test-token',
+    '--http-oauth-resource-metadata-url', 'https://auth.example.com/.well-known/oauth-protected-resource',
+    '--idle-timeout-ms', '0',
+  ]);
+  try {
+    const resp = await fetch(url, { method: 'GET' });
+    assert.equal(resp.status, 401);
+    const challenge = resp.headers.get('www-authenticate') || '';
+    assert.match(challenge, /Bearer/i);
+    assert.match(challenge, /resource_metadata=/i);
+    assert.match(challenge, /https:\/\/auth\.example\.com\/\.well-known\/oauth-protected-resource/i);
+  } finally {
+    await stopServer(proc);
+  }
+});

@@ -62,3 +62,11 @@ If using native HTTP mode for this server directly:
 - Bearer token validation on every request.
 - Audience/scope enforcement.
 
+Phase 2 scaffold support now exists in this repo:
+- `--http-oauth-resource-metadata-url`
+- `--http-oauth-protected-resource-path`
+- `--http-oauth-authorization-server-issuer`
+- `--http-oauth-scopes`
+
+See:
+- `/Users/kosta/Documents/ProjectsCode/github-mcp-server/docs/ops/oauth-scaffold-phase2.md`

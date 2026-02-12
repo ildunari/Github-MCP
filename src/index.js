@@ -132,6 +132,26 @@ const y = yargs(rawArgv)
     description: 'Refuse startup if HTTP binds off-localhost without --http-auth-token.',
     default: process.env.MCP_HTTP_REQUIRE_AUTH_ON_PUBLIC_BIND === 'true',
   })
+  .option('http-oauth-resource-metadata-url', {
+    type: 'string',
+    description: 'Optional OAuth protected resource metadata URL advertised in WWW-Authenticate challenge.',
+    default: process.env.MCP_HTTP_OAUTH_RESOURCE_METADATA_URL,
+  })
+  .option('http-oauth-protected-resource-path', {
+    type: 'string',
+    description: 'Optional local path to serve OAuth protected resource metadata JSON.',
+    default: process.env.MCP_HTTP_OAUTH_PROTECTED_RESOURCE_PATH || '',
+  })
+  .option('http-oauth-authorization-server-issuer', {
+    type: 'string',
+    description: 'Optional authorization server issuer URL for protected resource metadata.',
+    default: process.env.MCP_HTTP_OAUTH_AUTHORIZATION_SERVER_ISSUER || '',
+  })
+  .option('http-oauth-scopes', {
+    type: 'string',
+    description: 'Comma-separated scopes_supported to include in protected resource metadata.',
+    default: process.env.MCP_HTTP_OAUTH_SCOPES || '',
+  })
   .help()
   .alias('help', 'h')
   .exitProcess(false);
@@ -269,6 +289,10 @@ async function runHttp() {
     maxSessions: argv.httpMaxSessions,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
     requireAuthOnPublicBind: Boolean(argv.httpRequireAuthOnPublicBind),
+    oauthResourceMetadataUrl: argv.httpOauthResourceMetadataUrl || '',
+    oauthProtectedResourcePath: argv.httpOauthProtectedResourcePath || '',
+    oauthAuthorizationServerIssuer: argv.httpOauthAuthorizationServerIssuer || '',
+    oauthScopes: argv.httpOauthScopes || '',
     createServerForSession: ({ onActivity }) => makeServer({ onActivity }),
   });
 

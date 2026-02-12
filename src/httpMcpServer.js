@@ -83,6 +83,10 @@ export async function startHttpMcpServer({
   maxSessions = 50,
   idleTimeoutMs = 0,
   requireAuthOnPublicBind = false,
+  oauthResourceMetadataUrl = '',
+  oauthProtectedResourcePath = '',
+  oauthAuthorizationServerIssuer = '',
+  oauthScopes = [],
   createServerForSession,
 } = {}) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
@@ -94,6 +98,24 @@ export async function startHttpMcpServer({
 
   const allowedOriginsList = normalizeCommaList(allowedOrigins);
   const allowedHostsList = normalizeCommaList(allowedHosts);
+  const oauthScopesList = normalizeCommaList(oauthScopes);
+  const oauthProtectedResourcePathValue = typeof oauthProtectedResourcePath === 'string'
+    ? oauthProtectedResourcePath.trim()
+    : '';
+  if (oauthProtectedResourcePathValue && !oauthProtectedResourcePathValue.startsWith('/')) {
+    throw new Error("Parameter 'oauthProtectedResourcePath' must start with '/'.");
+  }
+  if (oauthResourceMetadataUrl) {
+    let parsed;
+    try {
+      parsed = new URL(oauthResourceMetadataUrl);
+    } catch {
+      throw new Error("Parameter 'oauthResourceMetadataUrl' must be a valid URL.");
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error("Parameter 'oauthResourceMetadataUrl' must use http or https.");
+    }
+  }
   const isPublicBind = !isLocalBindHost(host);
 
   if (isPublicBind && requireAuthOnPublicBind && !authToken) {
@@ -141,7 +163,10 @@ export async function startHttpMcpServer({
     const auth = headerValue(req, 'authorization');
     const expected = `Bearer ${authToken}`;
     if (auth !== expected) {
-      res.setHeader('WWW-Authenticate', 'Bearer');
+      const challenge = oauthResourceMetadataUrl
+        ? `Bearer resource_metadata="${oauthResourceMetadataUrl}"`
+        : 'Bearer';
+      res.setHeader('WWW-Authenticate', challenge);
       sendText(res, 401, 'Unauthorized');
       return true;
     }
@@ -179,6 +204,29 @@ export async function startHttpMcpServer({
   async function handler(req, res) {
     try {
       const url = new URL(req.url || '/', `http://${host}`);
+      if (oauthProtectedResourcePathValue && url.pathname === oauthProtectedResourcePathValue) {
+        if ((req.method || 'GET').toUpperCase() !== 'GET') {
+          sendText(res, 405, 'Method Not Allowed');
+          return;
+        }
+        const scheme = (tlsKeyPath && tlsCertPath) ? 'https' : 'http';
+        const hostHeader = headerValue(req, 'host');
+        const addr = server.address();
+        const fallbackHost = `${host}:${typeof addr === 'object' && addr ? addr.port : port}`;
+        const origin = `${scheme}://${hostHeader || fallbackHost}`;
+        const payload = {
+          resource: `${origin}${path}`,
+        };
+        if (oauthAuthorizationServerIssuer) {
+          payload.authorization_servers = [oauthAuthorizationServerIssuer];
+        }
+        if (oauthScopesList.length > 0) {
+          payload.scopes_supported = oauthScopesList;
+        }
+        sendJson(res, 200, payload);
+        return;
+      }
+
       if (url.pathname !== path) {
         sendText(res, 404, 'Not Found');
         return;
