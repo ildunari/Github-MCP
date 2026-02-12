@@ -127,6 +127,11 @@ const y = yargs(rawArgv)
     description: 'Maximum concurrent MCP sessions (DoS guard).',
     default: process.env.MCP_HTTP_MAX_SESSIONS ? Number(process.env.MCP_HTTP_MAX_SESSIONS) : 50,
   })
+  .option('http-require-auth-on-public-bind', {
+    type: 'boolean',
+    description: 'Refuse startup if HTTP binds off-localhost without --http-auth-token.',
+    default: process.env.MCP_HTTP_REQUIRE_AUTH_ON_PUBLIC_BIND === 'true',
+  })
   .help()
   .alias('help', 'h')
   .exitProcess(false);
@@ -263,6 +268,7 @@ async function runHttp() {
     allowedHosts: argv.httpAllowedHosts,
     maxSessions: argv.httpMaxSessions,
     idleTimeoutMs: IDLE_TIMEOUT_MS,
+    requireAuthOnPublicBind: Boolean(argv.httpRequireAuthOnPublicBind),
     createServerForSession: ({ onActivity }) => makeServer({ onActivity }),
   });
 

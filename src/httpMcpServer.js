@@ -66,6 +66,11 @@ function isAllowed(value, allowlist) {
   return allowlist.some(a => a.toLowerCase() === v);
 }
 
+function isLocalBindHost(host) {
+  const h = String(host || '').toLowerCase();
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]';
+}
+
 export async function startHttpMcpServer({
   host = '127.0.0.1',
   port = 3000,
@@ -77,6 +82,7 @@ export async function startHttpMcpServer({
   allowedHosts = [],
   maxSessions = 50,
   idleTimeoutMs = 0,
+  requireAuthOnPublicBind = false,
   createServerForSession,
 } = {}) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
@@ -88,6 +94,22 @@ export async function startHttpMcpServer({
 
   const allowedOriginsList = normalizeCommaList(allowedOrigins);
   const allowedHostsList = normalizeCommaList(allowedHosts);
+  const isPublicBind = !isLocalBindHost(host);
+
+  if (isPublicBind && requireAuthOnPublicBind && !authToken) {
+    throw new Error(
+      "Refusing to start: HTTP endpoint is bound off-localhost but no auth token is configured. Set --http-auth-token or disable --http-require-auth-on-public-bind."
+    );
+  }
+  if (isPublicBind && !authToken) {
+    try {
+      console.error(
+        'Warning: HTTP endpoint is bound off-localhost without --http-auth-token. Use edge auth, IP allowlists, and rate limits.'
+      );
+    } catch {
+      // ignore
+    }
+  }
 
   const sessions = new Map();
 

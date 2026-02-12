@@ -163,6 +163,7 @@ Options:
       --http-allowed-origins  Comma-separated Origin allowlist (enforced only when Origin header is present)
       --http-allowed-hosts    Comma-separated Host allowlist (recommended when binding 0.0.0.0/::)
       --http-max-sessions     Maximum concurrent MCP sessions (DoS guard) [default: 50]
+      --http-require-auth-on-public-bind  Refuse startup if binding non-localhost without --http-auth-token [default: false]
   -h, --help             Show help
 ```
 
@@ -177,6 +178,33 @@ Options:
 - `--transport http` exposes a single MCP endpoint (default `http://127.0.0.1:3000/mcp`) supporting `GET`, `POST`, and `DELETE`.
 - By default the server binds to `127.0.0.1` for safety. If you bind to `0.0.0.0` or another interface, you should set `--http-auth-token` and strongly consider `--http-allowed-hosts` and `--http-allowed-origins`.
 - In HTTP mode, lazy tool loading state is session-isolated: each `Mcp-Session-Id` gets its own tool-group load state.
+- Optional stricter startup guard: `--http-require-auth-on-public-bind true` refuses startup when binding non-localhost without `--http-auth-token`.
+
+### supergateway + Cloudflare Baseline
+
+If you run this behind supergateway for Claude.ai remote connectors, pin the gateway transport/session/protocol flags explicitly:
+
+```bash
+supergateway \
+  --stdio 'npx github-mcp-server-kosta -t "$GITHUB_TOKEN"' \
+  --outputTransport streamableHttp \
+  --streamableHttpPath /mcp \
+  --protocolVersion 2025-06-18 \
+  --stateful true \
+  --sessionTimeout 900000 \
+  --healthEndpoint /healthz \
+  --healthEndpoint /readyz \
+  --logLevel info
+```
+
+See operational docs:
+- `docs/ops/baseline-connector-smoke.md`
+- `docs/ops/claude-connector-hardening.md`
+- `docs/ops/incident-playbook.md`
+
+Smoke scripts:
+- `scripts/smoke/remote-mcp-smoke.sh`
+- `scripts/smoke/edge-header-check.sh`
 
 ### Plain-English Security Guidance
 

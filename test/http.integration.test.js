@@ -55,6 +55,38 @@ async function startServer(args) {
   return { proc, url: new URL(url), getStderr: () => stderr };
 }
 
+async function startServerExpectExit(args) {
+  const proc = spawn('node', ['src/index.js', ...args], {
+    env: {
+      ...process.env,
+      GITHUB_TOKEN: 'dummy',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+
+  let stderr = '';
+  proc.stderr.setEncoding('utf8');
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  const code = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Timed out waiting for process exit. stderr:\n${stderr}`));
+    }, 10_000);
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    proc.on('exit', (exitCode) => {
+      clearTimeout(timeout);
+      resolve(exitCode);
+    });
+  });
+
+  return { code, stderr };
+}
+
 async function stopServer(proc) {
   if (!proc || proc.killed) return;
   proc.kill('SIGTERM');
@@ -168,4 +200,56 @@ test('http: lazy tool list starts small and expands after loading groups', async
       assert.equal(resp2.status, 404);
     }
   );
+});
+
+test('http: requires auth token on public bind when strict flag is enabled', async () => {
+  const { code, stderr } = await startServerExpectExit([
+    '--transport', 'http',
+    '--http-host', '0.0.0.0',
+    '--http-port', '0',
+    '--http-require-auth-on-public-bind', 'true',
+  ]);
+
+  assert.notEqual(code, 0);
+  assert.match(stderr, /auth/i);
+});
+
+test('http: rejects unauthenticated request when --http-auth-token is set', async () => {
+  const { proc, url } = await startServer([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-auth-token', 'test-token',
+    '--idle-timeout-ms', '0',
+  ]);
+  try {
+    const resp = await fetch(url, { method: 'GET' });
+    assert.equal(resp.status, 401);
+    assert.equal(resp.headers.get('www-authenticate'), 'Bearer');
+  } finally {
+    await stopServer(proc);
+  }
+});
+
+test('http: enforces origin allowlist when configured', async () => {
+  const { proc, url } = await startServer([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-allowed-origins', 'https://allowed.example.com',
+    '--idle-timeout-ms', '0',
+  ]);
+  try {
+    const denied = await fetch(url, {
+      method: 'GET',
+      headers: { Origin: 'https://blocked.example.com' },
+    });
+    assert.equal(denied.status, 403);
+
+    const allowed = await fetch(url, {
+      method: 'GET',
+      headers: { Origin: 'https://allowed.example.com' },
+    });
+    assert.equal(allowed.status, 400);
+  } finally {
+    await stopServer(proc);
+  }
 });
