@@ -296,3 +296,63 @@ test('http oauth scaffold: unauthorized challenge advertises resource metadata U
     await stopServer(proc);
   }
 });
+
+test('http oauth cutover path: keeps /mcp open while requiring auth on /mcp-oauth', async () => {
+  const { proc, url } = await startServer([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-oauth-cutover-path', '/mcp-oauth',
+    '--http-oauth-cutover-token', 'cutover-token',
+    '--idle-timeout-ms', '0',
+  ]);
+  try {
+    const primary = await fetch(url, { method: 'GET' });
+    assert.equal(primary.status, 400);
+
+    const cutoverNoAuth = await fetch(new URL('/mcp-oauth', url), { method: 'GET' });
+    assert.equal(cutoverNoAuth.status, 401);
+
+    const initResp = await fetch(new URL('/mcp-oauth', url), {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+        'MCP-Protocol-Version': '2025-06-18',
+        'Authorization': 'Bearer cutover-token',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: { roots: { listChanged: true } },
+          clientInfo: { name: 'cutover-test', version: '1.0.0' },
+        },
+      }),
+    });
+    assert.notEqual(initResp.status, 401);
+    const sid = initResp.headers.get('mcp-session-id');
+    assert.ok(sid);
+
+    // Session created on cutover endpoint should not be valid on primary endpoint.
+    const wrongPathUse = await fetch(url, {
+      method: 'GET',
+      headers: { 'Mcp-Session-Id': sid },
+    });
+    assert.equal(wrongPathUse.status, 404);
+  } finally {
+    await stopServer(proc);
+  }
+});
+
+test('http oauth cutover path: requires cutover token or fallback auth token', async () => {
+  const { code, stderr } = await startServerExpectExit([
+    '--transport', 'http',
+    '--http-port', '0',
+    '--http-oauth-cutover-path', '/mcp-oauth',
+  ]);
+
+  assert.notEqual(code, 0);
+  assert.match(stderr, /oauthCutoverToken|cutover/i);
+});

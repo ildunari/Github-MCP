@@ -20,6 +20,8 @@ This document explains the OAuth-related scaffolding now available in the MCP HT
 - `--http-oauth-protected-resource-path`
 - `--http-oauth-authorization-server-issuer`
 - `--http-oauth-scopes`
+- `--http-oauth-cutover-path`
+- `--http-oauth-cutover-token`
 
 ## Minimal local validation
 
@@ -53,3 +55,21 @@ Expected:
 - `401 Unauthorized`
 - `WWW-Authenticate: Bearer resource_metadata="..."`
 
+## Staged cutover mode
+
+Use this when you want to keep your existing `/mcp` endpoint behavior but test an auth-required connector path in parallel:
+
+```bash
+cd /Users/kosta/Documents/ProjectsCode/github-mcp-server
+GITHUB_TOKEN=... node src/index.js \
+  --transport http \
+  --http-port 3000 \
+  --http-path /mcp \
+  --http-oauth-cutover-path /mcp-oauth \
+  --http-oauth-cutover-token test-cutover-token
+```
+
+Behavior:
+1. `/mcp` follows the primary endpoint auth behavior.
+2. `/mcp-oauth` always requires bearer token auth (token above, or fallback `--http-auth-token`).
+3. Sessions are endpoint-bound (a session created on `/mcp-oauth` is not valid on `/mcp`).

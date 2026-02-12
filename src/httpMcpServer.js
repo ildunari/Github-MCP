@@ -87,10 +87,19 @@ export async function startHttpMcpServer({
   oauthProtectedResourcePath = '',
   oauthAuthorizationServerIssuer = '',
   oauthScopes = [],
+  oauthCutoverPath = '',
+  oauthCutoverToken = '',
   createServerForSession,
 } = {}) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new Error("Parameter 'path' must start with '/'.");
+  }
+  const cutoverPath = typeof oauthCutoverPath === 'string' ? oauthCutoverPath.trim() : '';
+  if (cutoverPath && !cutoverPath.startsWith('/')) {
+    throw new Error("Parameter 'oauthCutoverPath' must start with '/'.");
+  }
+  if (cutoverPath && cutoverPath === path) {
+    throw new Error("Parameter 'oauthCutoverPath' must be different from 'path'.");
   }
   if (typeof createServerForSession !== 'function') {
     throw new Error("Parameter 'createServerForSession' must be a function.");
@@ -117,6 +126,10 @@ export async function startHttpMcpServer({
     }
   }
   const isPublicBind = !isLocalBindHost(host);
+  const cutoverAuthToken = oauthCutoverToken || authToken || '';
+  if (cutoverPath && !cutoverAuthToken) {
+    throw new Error("Parameter 'oauthCutoverToken' (or --http-auth-token) is required when oauthCutoverPath is set.");
+  }
 
   if (isPublicBind && requireAuthOnPublicBind && !authToken) {
     throw new Error(
@@ -158,10 +171,10 @@ export async function startHttpMcpServer({
     }
   }
 
-  function rejectIfUnauthorized(req, res) {
-    if (!authToken) return false;
+  function unauthorizedChallenge(req, res, token) {
+    if (!token) return false;
     const auth = headerValue(req, 'authorization');
-    const expected = `Bearer ${authToken}`;
+    const expected = `Bearer ${token}`;
     if (auth !== expected) {
       const challenge = oauthResourceMetadataUrl
         ? `Bearer resource_metadata="${oauthResourceMetadataUrl}"`
@@ -171,6 +184,11 @@ export async function startHttpMcpServer({
       return true;
     }
     return false;
+  }
+
+  function authTokenForEndpoint(endpointKind) {
+    if (endpointKind === 'cutover') return cutoverAuthToken;
+    return authToken || '';
   }
 
   function rejectIfOriginNotAllowed(req, res) {
@@ -226,18 +244,22 @@ export async function startHttpMcpServer({
         sendJson(res, 200, payload);
         return;
       }
-
-      if (url.pathname !== path) {
+      let endpointKind = null;
+      if (url.pathname === path) endpointKind = 'primary';
+      else if (cutoverPath && url.pathname === cutoverPath) endpointKind = 'cutover';
+      if (!endpointKind) {
         sendText(res, 404, 'Not Found');
         return;
       }
 
-      if (rejectIfUnauthorized(req, res)) return;
       if (rejectIfOriginNotAllowed(req, res)) return;
       if (rejectIfHostNotAllowed(req, res)) return;
 
       const method = (req.method || 'GET').toUpperCase();
       const sessionId = headerValue(req, 'mcp-session-id');
+      const endpointAuthToken = authTokenForEndpoint(endpointKind);
+
+      if (!sessionId && unauthorizedChallenge(req, res, endpointAuthToken)) return;
 
       let parsedBody;
       if (method === 'POST') {
@@ -255,6 +277,11 @@ export async function startHttpMcpServer({
           sendText(res, 404, 'Unknown MCP session');
           return;
         }
+        if (ctx.endpointKind !== endpointKind) {
+          sendText(res, 404, 'Unknown MCP session');
+          return;
+        }
+        if (unauthorizedChallenge(req, res, ctx.authToken)) return;
         ctx.lastActivityAt = Date.now();
         await ctx.transport.handleRequest(req, res, parsedBody);
         return;
@@ -277,6 +304,8 @@ export async function startHttpMcpServer({
         shutdown: undefined,
         createdAt: Date.now(),
         lastActivityAt: Date.now(),
+        endpointKind,
+        authToken: endpointAuthToken,
       };
 
       const transport = new StreamableHTTPServerTransport({

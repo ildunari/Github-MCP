@@ -168,6 +168,8 @@ Options:
       --http-oauth-protected-resource-path  Optional local path to serve OAuth protected resource metadata JSON
       --http-oauth-authorization-server-issuer  Optional authorization server issuer included in metadata
       --http-oauth-scopes  Comma-separated scopes_supported included in metadata
+      --http-oauth-cutover-path  Optional second MCP endpoint path for staged OAuth cutover (example: /mcp-oauth)
+      --http-oauth-cutover-token  Bearer token required on cutover endpoint (falls back to --http-auth-token)
   -h, --help             Show help
 ```
 
@@ -219,6 +221,8 @@ This server now supports optional OAuth discovery/challenge scaffolding for stag
 - `--http-oauth-protected-resource-path`: serves a local OAuth Protected Resource Metadata JSON document.
 - `--http-oauth-authorization-server-issuer`: adds `authorization_servers` to the metadata JSON.
 - `--http-oauth-scopes`: adds `scopes_supported` to the metadata JSON.
+- `--http-oauth-cutover-path`: adds a second staged endpoint (for example `/mcp-oauth`) so you can keep `/mcp` behavior unchanged while testing auth-required connector cutover.
+- `--http-oauth-cutover-token`: token required on the cutover endpoint; if unset, the server falls back to `--http-auth-token`.
 
 Example:
 
@@ -233,6 +237,18 @@ npx github-mcp-server-kosta \
   --http-oauth-protected-resource-path "/.well-known/oauth-protected-resource" \
   --http-oauth-authorization-server-issuer "https://auth.example.com" \
   --http-oauth-scopes "mcp.read,mcp.write"
+```
+
+Staged cutover example (`/mcp` open, `/mcp-oauth` protected):
+
+```bash
+npx github-mcp-server-kosta \
+  --transport http \
+  --http-host 127.0.0.1 \
+  --http-port 3000 \
+  --http-path /mcp \
+  --http-oauth-cutover-path /mcp-oauth \
+  --http-oauth-cutover-token "$MCP_CUTOVER_TOKEN"
 ```
 
 Important:

@@ -152,6 +152,16 @@ const y = yargs(rawArgv)
     description: 'Comma-separated scopes_supported to include in protected resource metadata.',
     default: process.env.MCP_HTTP_OAUTH_SCOPES || '',
   })
+  .option('http-oauth-cutover-path', {
+    type: 'string',
+    description: 'Optional second MCP endpoint path for staged OAuth cutover (for example /mcp-oauth).',
+    default: process.env.MCP_HTTP_OAUTH_CUTOVER_PATH || '',
+  })
+  .option('http-oauth-cutover-token', {
+    type: 'string',
+    description: 'Bearer token required on the cutover endpoint path. Falls back to --http-auth-token if unset.',
+    default: process.env.MCP_HTTP_OAUTH_CUTOVER_TOKEN || '',
+  })
   .help()
   .alias('help', 'h')
   .exitProcess(false);
@@ -293,6 +303,8 @@ async function runHttp() {
     oauthProtectedResourcePath: argv.httpOauthProtectedResourcePath || '',
     oauthAuthorizationServerIssuer: argv.httpOauthAuthorizationServerIssuer || '',
     oauthScopes: argv.httpOauthScopes || '',
+    oauthCutoverPath: argv.httpOauthCutoverPath || '',
+    oauthCutoverToken: argv.httpOauthCutoverToken || '',
     createServerForSession: ({ onActivity }) => makeServer({ onActivity }),
   });
 
