@@ -212,7 +212,6 @@ export async function startHttpMcpServer({
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
-          if (sessions.size >= maxSessions) return;
           sessions.set(sid, ctx);
         },
         onsessionclosed: async (sid) => {
@@ -227,16 +226,34 @@ export async function startHttpMcpServer({
         await cleanupSession(sid, 'transport closed');
       };
 
-      const { server: mcpServer, shutdown } = createServerForSession({
-        onActivity: () => {
-          ctx.lastActivityAt = Date.now();
-        },
-      });
-      ctx.server = mcpServer;
-      ctx.shutdown = shutdown;
-      await mcpServer.connect(transport);
+      try {
+        const { server: mcpServer, shutdown } = createServerForSession({
+          onActivity: () => {
+            ctx.lastActivityAt = Date.now();
+          },
+        });
+        ctx.server = mcpServer;
+        ctx.shutdown = shutdown;
+        await mcpServer.connect(transport);
 
-      await transport.handleRequest(req, res, parsedBody);
+        await transport.handleRequest(req, res, parsedBody);
+      } catch (e) {
+        const sid = transport.sessionId;
+        if (sid) await cleanupSession(sid, 'initialize failed');
+        else {
+          try {
+            await transport.close?.();
+          } catch {
+            // ignore
+          }
+          try {
+            await ctx.shutdown?.();
+          } catch {
+            // ignore
+          }
+        }
+        throw e;
+      }
     } catch (e) {
       if (res.headersSent) return;
       sendJson(res, 500, {
@@ -289,4 +306,3 @@ export async function startHttpMcpServer({
     },
   };
 }
-
