@@ -178,6 +178,15 @@ Options:
 - By default the server binds to `127.0.0.1` for safety. If you bind to `0.0.0.0` or another interface, you should set `--http-auth-token` and strongly consider `--http-allowed-hosts` and `--http-allowed-origins`.
 - In HTTP mode, lazy tool loading state is session-isolated: each `Mcp-Session-Id` gets its own tool-group load state.
 
+### Plain-English Security Guidance
+
+If you only ever run this on your own machine and nothing else can reach it, you can usually skip authentication.
+
+If you bind the HTTP server to a network interface that other devices can reach (for example `--http-host 0.0.0.0`), then anyone who can access that address could potentially use your GitHub token via these tools. In that case you should:
+
+- Prefer putting authentication at your gateway (supergateway / Cloudflare / your connector) so the MCP server itself can remain localhost-only.
+- Or set `--http-auth-token` so the `/mcp` endpoint requires a Bearer token.
+
 ## Response Formats
 
 Most tools support two detail levels:

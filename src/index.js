@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
@@ -7,7 +8,15 @@ import { hideBin } from 'yargs/helpers';
 import { createGithubServer } from './githubServerFactory.js';
 import { startHttpMcpServer } from './httpMcpServer.js';
 
-const SERVER_VERSION = '2.2.0';
+const SERVER_VERSION = (() => {
+  try {
+    const raw = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
+    const pkg = JSON.parse(raw);
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 function defaultIdleTimeoutMs() {
   const raw = process.env.MCP_IDLE_TIMEOUT_MS;
@@ -291,4 +300,3 @@ main().catch((error) => {
   console.error('Failed to start server:', error);
   process.exit(1);
 });
-

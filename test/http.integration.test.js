@@ -81,7 +81,7 @@ async function withHttpClient(serverArgs, fn) {
 
   try {
     await client.connect(transport);
-    await fn(client, transport);
+    await fn(client, transport, url);
   } finally {
     try {
       await transport.terminateSession();
@@ -105,11 +105,18 @@ async function withHttpClient(serverArgs, fn) {
 test('http: full tool list includes rest escape hatch', async () => {
   await withHttpClient(
     ['--transport', 'http', '--http-port', '0', '--tool-mode', 'full', '--tool-schema-verbosity', 'compact', '--idle-timeout-ms', '0', '--rate-limit', '0'],
-    async (client) => {
+    async (client, transport, url) => {
       const tools = await client.listTools({});
       const toolNames = new Set((tools.tools || []).map(t => t.name));
       assert.ok(toolNames.has('github_rest_mutate'));
       assert.ok(toolNames.has('github_tool_groups_load'));
+
+      // Unknown session should be rejected.
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: { 'Mcp-Session-Id': 'not-a-real-session' },
+      });
+      assert.equal(resp.status, 404);
     }
   );
 });
@@ -125,7 +132,7 @@ test('http: lazy tool list starts small and expands after loading groups', async
       '--idle-timeout-ms', '0',
       '--rate-limit', '0',
     ],
-    async (client) => {
+    async (client, transport, url) => {
       {
         const tools = await client.listTools({});
         const toolNames = new Set((tools.tools || []).map(t => t.name));
@@ -147,6 +154,18 @@ test('http: lazy tool list starts small and expands after loading groups', async
         const toolNames = new Set((tools.tools || []).map(t => t.name));
         assert.ok(toolNames.has('github_update_issue'));
       }
+
+      // Terminate session and verify it disappears server-side (best-effort polling).
+      const sid = transport.sessionId;
+      assert.ok(sid);
+      await transport.terminateSession();
+      for (let i = 0; i < 20; i++) {
+        const resp = await fetch(url, { method: 'GET', headers: { 'Mcp-Session-Id': sid } });
+        if (resp.status === 404) break;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      const resp2 = await fetch(url, { method: 'GET', headers: { 'Mcp-Session-Id': sid } });
+      assert.equal(resp2.status, 404);
     }
   );
 });
