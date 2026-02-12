@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server providing comprehensive GitHub repository operations — read and write — through a simple CLI interface. Built for Claude Desktop and other MCP clients.
 
-**v2.0.0** — 21 tools, MCP SDK v1.26.0, tool annotations, server instructions.
+**v2.0.2** — Adds deterministic shutdown on stdio close/signals and an idle timeout (defaults to 5 minutes; configurable via `MCP_IDLE_TIMEOUT_MS`) to help prevent leaked sessions. Also supports `GITHUB_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` env vars to avoid passing tokens on argv.
 
 ## Features
 
@@ -22,18 +22,21 @@ A Model Context Protocol (MCP) server providing comprehensive GitHub repository 
 
 ```bash
 # Run directly with npx (no installation needed)
-npx github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
+GITHUB_TOKEN=your_token_here npx github-mcp-server-kosta
 
-# Or use environment variable
-export GITHUB_TOKEN=your_token_here
-npx github-mcp-server-kosta --github-token $GITHUB_TOKEN
+# Idle auto-exit defaults to 5 minutes (prevents leaked stdio servers from piling up).
+# Disable if you need an always-on process:
+MCP_IDLE_TIMEOUT_MS=0 GITHUB_TOKEN=your_token_here npx github-mcp-server-kosta
+
+# Not recommended (token is visible via `ps` on the machine):
+npx github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
 ```
 
 ### Global Installation
 
 ```bash
 npm install -g github-mcp-server-kosta
-github-mcp-server-kosta --github-token YOUR_GITHUB_TOKEN
+GITHUB_TOKEN=your_token_here github-mcp-server-kosta
 ```
 
 ## GitHub Token Setup
@@ -111,9 +114,10 @@ For Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.
 
 ```
 Options:
-  -t, --github-token  GitHub access token for API requests [required]
-  -r, --rate-limit    Rate limit delay in ms between requests [default: 100]
-  -h, --help          Show help
+  -t, --github-token     GitHub access token for API requests (or set GITHUB_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN)
+      --idle-timeout-ms  Exit after this many ms without receiving an MCP request (0 disables). [default: 300000]
+  -r, --rate-limit       Rate limit delay in ms between requests [default: 100]
+  -h, --help             Show help
 ```
 
 ## Response Formats

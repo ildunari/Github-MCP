@@ -14,12 +14,26 @@ import { hideBin } from 'yargs/helpers';
 
 // ─── CLI Parsing ────────────────────────────────────────────────────────────────
 
-const argv = yargs(hideBin(process.argv))
+const rawArgv = hideBin(process.argv);
+const wantsHelp = rawArgv.includes('--help') || rawArgv.includes('-h');
+const defaultIdleTimeoutMs = (() => {
+  const raw = process.env.MCP_IDLE_TIMEOUT_MS;
+  if (raw === undefined) return 300_000; // 5 minutes: avoids leaking stdio servers forever by default.
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 300_000;
+})();
+
+const y = yargs(rawArgv)
   .option('github-token', {
     alias: 't',
     type: 'string',
     description: 'GitHub access token for API requests',
-    demandOption: true,
+  })
+  .option('idle-timeout-ms', {
+    type: 'number',
+    description:
+      'Exit after this many ms without receiving an MCP request (0 disables). Useful to avoid leaked stdio sessions.',
+    default: defaultIdleTimeoutMs,
   })
   .option('rate-limit', {
     alias: 'r',
@@ -37,23 +51,49 @@ const argv = yargs(hideBin(process.argv))
     'npx github-mcp-server-kosta -t $GITHUB_TOKEN',
     'Run with token from environment variable'
   )
-  .parse();
+  .example(
+    'MCP_IDLE_TIMEOUT_MS=300000 npx github-mcp-server-kosta -t $GITHUB_TOKEN',
+    'Auto-exit after 5 minutes idle (helps prevent orphaned sessions)'
+  )
+  .exitProcess(false);
 
-const GITHUB_TOKEN = argv.githubToken;
+const argv = y.parse();
+if (wantsHelp) {
+  process.exit(0);
+}
+
+const GITHUB_TOKEN =
+  argv.githubToken ||
+  process.env.GITHUB_TOKEN ||
+  process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+if (!GITHUB_TOKEN) {
+  console.error(
+    'Missing GitHub token. Provide --github-token (or -t) or set GITHUB_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN.'
+  );
+  process.exit(2);
+}
+
 const RATE_LIMIT_DELAY = argv.rateLimit;
+const IDLE_TIMEOUT_MS = argv.idleTimeoutMs;
 const API_BASE_URL = 'https://api.github.com';
 
 const HEADERS = {
   'Authorization': `Bearer ${GITHUB_TOKEN}`,
   'Accept': 'application/vnd.github+json',
   'X-GitHub-Api-Version': '2022-11-28',
-  'User-Agent': 'GitHub-MCP-Server/2.0.0'
+  'User-Agent': 'GitHub-MCP-Server/2.0.2'
 };
 
 // ─── Helper Functions ───────────────────────────────────────────────────────────
 
 let lastRequestTime = 0;
+let lastActivityTime = Date.now();
+function noteActivity() {
+  lastActivityTime = Date.now();
+}
+
 async function rateLimitedRequest(url, options = {}) {
+  noteActivity();
   const now = Date.now();
   const timeSinceLastRequest = now - lastRequestTime;
   if (timeSinceLastRequest < RATE_LIMIT_DELAY) {
@@ -255,7 +295,7 @@ Response Modes: Most tools accept detail_level "summary" (default, concise) or "
 const server = new Server(
   {
     name: '@ildunari/github-mcp-server',
-    version: '2.0.0',
+    version: '2.0.2',
   },
   {
     capabilities: {
@@ -930,10 +970,12 @@ const TOOLS = [
 // ─── Request Handlers ───────────────────────────────────────────────────────────
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+  noteActivity();
   return { tools: TOOLS };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  noteActivity();
   const { name, arguments: args } = request.params;
 
   try {
@@ -1292,8 +1334,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   const transport = new StdioServerTransport();
+
+  // STDIO MCP servers are often long-lived, but some clients accidentally leak processes.
+  // This block makes shutdown deterministic and optionally auto-exits when idle.
+  let shuttingDown = false;
+  async function shutdown(reason, exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    try {
+      console.error(`GitHub MCP Server shutting down (${reason})`);
+    } catch {
+      // ignore
+    }
+
+    try {
+      await transport.close?.();
+    } catch {
+      // ignore
+    }
+    try {
+      await server.close?.();
+    } catch {
+      // ignore
+    }
+
+    process.exit(exitCode);
+  }
+
+  process.stdin.on('end', () => shutdown('stdin ended'));
+  process.stdin.on('close', () => shutdown('stdin closed'));
+  process.on('SIGINT', () => shutdown('SIGINT', 130));
+  process.on('SIGTERM', () => shutdown('SIGTERM', 143));
+  process.on('SIGHUP', () => shutdown('SIGHUP', 129));
+  process.on('uncaughtException', (err) => {
+    try {
+      console.error('uncaughtException:', err);
+    } catch {
+      // ignore
+    }
+    shutdown('uncaughtException', 1);
+  });
+  process.on('unhandledRejection', (err) => {
+    try {
+      console.error('unhandledRejection:', err);
+    } catch {
+      // ignore
+    }
+    shutdown('unhandledRejection', 1);
+  });
+
+  if (IDLE_TIMEOUT_MS > 0) {
+    const tickMs = Math.min(Math.max(1000, Math.floor(IDLE_TIMEOUT_MS / 5)), 30_000);
+    const interval = setInterval(() => {
+      const idleForMs = Date.now() - lastActivityTime;
+      if (idleForMs >= IDLE_TIMEOUT_MS) {
+        shutdown(`idle timeout (${idleForMs}ms >= ${IDLE_TIMEOUT_MS}ms)`);
+      }
+    }, tickMs);
+    interval.unref?.();
+  }
+
   await server.connect(transport);
-  console.error('GitHub MCP Server v2.0.0 running on stdio');
+  console.error('GitHub MCP Server v2.0.2 running on stdio');
 }
 
 main().catch((error) => {
