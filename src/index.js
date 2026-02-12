@@ -23,11 +23,32 @@ const defaultIdleTimeoutMs = (() => {
   return Number.isFinite(n) ? n : 300_000;
 })();
 
+const TOOL_MODE_ENV = process.env.MCP_TOOL_MODE;
+const TOOL_SCHEMA_VERBOSITY_ENV = process.env.MCP_TOOL_SCHEMA_VERBOSITY;
+const PRELOAD_GROUPS_ENV = process.env.MCP_PRELOAD_GROUPS;
+
 const y = yargs(rawArgv)
   .option('github-token', {
     alias: 't',
     type: 'string',
     description: 'GitHub access token for API requests',
+  })
+  .option('tool-mode', {
+    type: 'string',
+    choices: ['full', 'lazy'],
+    description: 'Tool listing mode. "lazy" starts with minimal tools and loads groups on demand.',
+    default: TOOL_MODE_ENV || 'full',
+  })
+  .option('preload-groups', {
+    type: 'string',
+    description: 'Comma-separated tool group IDs to preload (used in --tool-mode lazy).',
+    default: PRELOAD_GROUPS_ENV || '',
+  })
+  .option('tool-schema-verbosity', {
+    type: 'string',
+    choices: ['full', 'compact'],
+    description: 'Tool schema verbosity to reduce initial context cost.',
+    default: TOOL_SCHEMA_VERBOSITY_ENV || 'full',
   })
   .option('idle-timeout-ms', {
     type: 'number',
@@ -62,6 +83,15 @@ if (wantsHelp) {
   process.exit(0);
 }
 
+const TOOL_MODE = argv.toolMode || 'full';
+const TOOL_SCHEMA_VERBOSITY = argv.toolSchemaVerbosity || 'full';
+const PRELOAD_GROUPS_RAW = argv.preloadGroups || '';
+const DEFAULT_PRELOAD_GROUPS = TOOL_MODE === 'lazy' ? 'core,search' : '';
+const PRELOAD_GROUPS = (PRELOAD_GROUPS_RAW || DEFAULT_PRELOAD_GROUPS)
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const GITHUB_TOKEN =
   argv.githubToken ||
   process.env.GITHUB_TOKEN ||
@@ -81,7 +111,7 @@ const HEADERS = {
   'Authorization': `Bearer ${GITHUB_TOKEN}`,
   'Accept': 'application/vnd.github+json',
   'X-GitHub-Api-Version': '2022-11-28',
-  'User-Agent': 'GitHub-MCP-Server/2.0.2'
+  'User-Agent': 'GitHub-MCP-Server/2.1.0'
 };
 
 // ─── Helper Functions ───────────────────────────────────────────────────────────
@@ -100,7 +130,9 @@ async function rateLimitedRequest(url, options = {}) {
     await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY - timeSinceLastRequest));
   }
   lastRequestTime = Date.now();
-  return fetch(url, { headers: HEADERS, ...options });
+  const mergedHeaders = { ...HEADERS, ...(options.headers || {}) };
+  const finalOptions = { ...options, headers: mergedHeaders };
+  return fetch(url, finalOptions);
 }
 
 function parseRepoUrl(url) {
@@ -153,13 +185,13 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function fetchWithBody(url, method, body) {
+async function fetchWithBody(url, method, body, options = {}) {
   try {
     const response = await rateLimitedRequest(url, {
       method,
       headers: {
-        ...HEADERS,
         'Content-Type': 'application/json',
+        ...(options.headers || {}),
       },
       body: JSON.stringify(body),
     });
@@ -184,6 +216,61 @@ async function fetchWithBody(url, method, body) {
   } catch (error) {
     throw error;
   }
+}
+
+function toolResultFromText(text, { isError = false } = {}) {
+  const result = {
+    content: [{
+      type: 'text',
+      text,
+    }],
+  };
+  if (isError) result.isError = true;
+  return result;
+}
+
+function toolResultFromJson(data, { isError = false } = {}) {
+  return toolResultFromText(JSON.stringify(data, null, 2), { isError });
+}
+
+function toolError(message, details) {
+  const payload = details ? { error: message, ...details } : { error: message };
+  return toolResultFromJson(payload, { isError: true });
+}
+
+function normalizeApiPath(path) {
+  if (typeof path !== 'string' || path.length === 0) {
+    throw new Error("Parameter 'path' must be a non-empty string.");
+  }
+  if (!path.startsWith('/')) {
+    throw new Error("Parameter 'path' must start with '/'.");
+  }
+  if (path.includes('://')) {
+    throw new Error("Parameter 'path' must be a GitHub API path, not a full URL.");
+  }
+  if (path.includes('..')) {
+    throw new Error("Parameter 'path' must not contain '..'.");
+  }
+  if (path.includes('\n') || path.includes('\r')) {
+    throw new Error("Parameter 'path' must not contain newlines.");
+  }
+  return path;
+}
+
+function buildApiUrl(path, query) {
+  const cleanPath = normalizeApiPath(path);
+  const url = new URL(`${API_BASE_URL}${cleanPath}`);
+  if (query && typeof query === 'object') {
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === null) continue;
+      if (typeof k !== 'string') continue;
+      if (typeof v !== 'string') {
+        throw new Error("Parameter 'query' values must be strings.");
+      }
+      url.searchParams.set(k, v);
+    }
+  }
+  return url.toString();
 }
 
 async function fetchAllItems(initialUrl) {
@@ -295,13 +382,15 @@ Response Modes: Most tools accept detail_level "summary" (default, concise) or "
 const server = new Server(
   {
     name: '@ildunari/github-mcp-server',
-    version: '2.0.2',
+    version: '2.1.0',
   },
   {
     capabilities: {
-      tools: {},
+      tools: { listChanged: true },
     },
-    instructions: SERVER_INSTRUCTIONS,
+    instructions: TOOL_SCHEMA_VERBOSITY === 'compact'
+      ? 'GitHub MCP Server — use tools to interact with the GitHub REST API.'
+      : SERVER_INSTRUCTIONS,
   }
 );
 
@@ -314,11 +403,62 @@ const READ_ANNOTATIONS = {
   openWorldHint: true,
 };
 
-const TOOLS = [
+const TOOL_DEFS = [
+  // ── Lazy Tool Discovery Bootstrap ──────────────────────────────────────────
+  {
+    name: 'github_tool_groups_list',
+    title: 'List Tool Groups',
+    description: 'List available tool groups and whether they are loaded.',
+    annotations: { ...READ_ANNOTATIONS, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {}
+    }
+  },
+  {
+    name: 'github_tool_groups_load',
+    title: 'Load Tool Groups',
+    description: 'Load one or more tool groups and notify the client that the tool list has changed.',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        groups: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Group IDs to load.'
+        }
+      },
+      required: ['groups'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_tool_catalog_search',
+    title: 'Search Tool Catalog',
+    description: 'Search available tool groups and tool names without loading full tool schemas.',
+    annotations: { ...READ_ANNOTATIONS, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query string.' }
+      },
+      required: ['query'],
+      additionalProperties: false,
+    }
+  },
+
   // ── Repository Operations ──────────────────────────────────────────────────
 
   {
     name: 'github_repo_info',
+    title: 'Get Repository Info',
     description: 'Retrieve metadata for a GitHub repository including stars, forks, open issues count, default branch, visibility, and language breakdown. Use as a starting point to understand a repository before exploring its contents.',
     annotations: { title: 'Get Repository Info', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -340,6 +480,7 @@ const TOOLS = [
   },
   {
     name: 'github_list_contents',
+    title: 'List Directory Contents',
     description: 'List files and directories at a given path in a GitHub repository. Returns names, types (file/dir/submodule), and sizes. Use to explore repository structure before reading specific files with github_get_file_content.',
     annotations: { title: 'List Directory Contents', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -370,6 +511,7 @@ const TOOLS = [
   },
   {
     name: 'github_get_file_content',
+    title: 'Get File Content',
     description: 'Read the contents of a single file from a GitHub repository. Returns decoded UTF-8 text, the file SHA (needed for updates via github_create_or_update_file), size, and URL. Files over 1MB cannot be retrieved via this endpoint.',
     annotations: { title: 'Get File Content', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -393,6 +535,7 @@ const TOOLS = [
   },
   {
     name: 'github_get_readme',
+    title: 'Get README',
     description: 'Fetch and decode the README file of a GitHub repository. Automatically finds README regardless of casing or extension. Returns decoded content for quick project understanding.',
     annotations: { title: 'Get README', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -412,6 +555,7 @@ const TOOLS = [
   },
   {
     name: 'github_search_code',
+    title: 'Search Code in Repo',
     description: 'Search for code matching a query within a specific GitHub repository. Returns file paths and text fragments. Supports GitHub qualifiers like language:, filename:, extension:, and path: in the query string.',
     annotations: { title: 'Search Code in Repo', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -437,6 +581,7 @@ const TOOLS = [
   },
   {
     name: 'github_list_repos',
+    title: 'List User/Org Repos',
     description: 'List repositories for a specific GitHub user or organization. Returns names, descriptions, languages, and star counts. Use github_search_repos for global search or this tool when you know the owner.',
     annotations: { title: 'List User/Org Repos', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -475,6 +620,7 @@ const TOOLS = [
   },
   {
     name: 'github_search_repos',
+    title: 'Search Repositories',
     description: 'Search GitHub repositories globally by keyword, language, stars, or other qualifiers. Returns matching repository names, descriptions, and star counts. Supports qualifiers like "language:", "stars:>100", "topic:", "org:".',
     annotations: { title: 'Search Repositories', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -510,11 +656,33 @@ const TOOLS = [
       required: ['query']
     }
   },
+  {
+    name: 'github_search_issues',
+    title: 'Search Issues and PRs',
+    description: 'Search issues and pull requests using GitHub Search Issues API. Use query qualifiers like "repo:owner/repo is:issue is:pr".',
+    annotations: { title: 'Search Issues and PRs', ...READ_ANNOTATIONS },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query (GitHub search syntax).' },
+        per_page: { type: 'number', description: 'Results per page (max 100).', default: 30 },
+        detail_level: {
+          type: 'string',
+          enum: ['summary', 'detailed'],
+          description: 'Response detail level.',
+          default: 'summary',
+        }
+      },
+      required: ['query'],
+      additionalProperties: false,
+    }
+  },
 
   // ── Issues & Pull Requests ─────────────────────────────────────────────────
 
   {
     name: 'github_list_issues',
+    title: 'List Issues',
     description: 'List issues in a GitHub repository with optional filtering by state, labels, and assignee. Returns titles, numbers, states, and labels. Note: GitHub API includes pull requests as issues; filter by absence of pull_request field for true issues.',
     annotations: { title: 'List Issues', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -555,6 +723,7 @@ const TOOLS = [
   },
   {
     name: 'github_get_issue',
+    title: 'Get Issue Details',
     description: 'Retrieve full details of a specific issue by number, including title, body (Markdown), state, labels, assignees, milestone, and comments count. Use after github_list_issues to get complete information.',
     annotations: { title: 'Get Issue Details', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -580,6 +749,7 @@ const TOOLS = [
   },
   {
     name: 'github_list_pulls',
+    title: 'List Pull Requests',
     description: 'List pull requests in a GitHub repository with optional filtering by state, head branch, and base branch. Returns PR titles, numbers, states, authors, and branch info.',
     annotations: { title: 'List Pull Requests', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -620,6 +790,7 @@ const TOOLS = [
   },
   {
     name: 'github_get_pull',
+    title: 'Get Pull Request Details',
     description: 'Retrieve full details of a specific pull request by number, including title, body, diff stats (additions/deletions/changed files), merge status, head/base branches, and review status.',
     annotations: { title: 'Get Pull Request Details', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -648,6 +819,7 @@ const TOOLS = [
 
   {
     name: 'github_list_branches',
+    title: 'List Branches',
     description: 'List all branches in a GitHub repository. Returns branch names, commit SHAs, and protection status. Use to discover branches before switching refs in other tools.',
     annotations: { title: 'List Branches', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -669,6 +841,7 @@ const TOOLS = [
   },
   {
     name: 'github_list_commits',
+    title: 'List Commits',
     description: 'List commits in a GitHub repository with optional filtering by file path, author, branch, and date range. Returns SHAs, messages, authors, and timestamps. Useful for understanding recent changes or tracking file history.',
     annotations: { title: 'List Commits', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -715,6 +888,7 @@ const TOOLS = [
   },
   {
     name: 'github_get_commit',
+    title: 'Get Commit Details',
     description: 'Retrieve full details of a specific commit by SHA, including message, author, timestamp, parent SHAs, and the complete diff (files changed with patches). Use after github_list_commits to inspect a change.',
     annotations: { title: 'Get Commit Details', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -740,6 +914,7 @@ const TOOLS = [
   },
   {
     name: 'github_compare',
+    title: 'Compare Refs',
     description: 'Compare two git refs (branches, tags, or commits) and return the diff. Shows ahead/behind counts, commit list, and file changes. Useful for reviewing changes between releases or branches.',
     annotations: { title: 'Compare Refs', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -772,6 +947,7 @@ const TOOLS = [
 
   {
     name: 'github_list_releases',
+    title: 'List Releases',
     description: 'List releases in a GitHub repository including names, tag names, publication dates, pre-release status, and release notes. Returns asset download URLs.',
     annotations: { title: 'List Releases', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -801,6 +977,7 @@ const TOOLS = [
 
   {
     name: 'github_user_info',
+    title: 'Get User Info',
     description: 'Retrieve a GitHub user\'s public profile: name, bio, company, location, public repo count, followers, and account creation date. Works for user and organization accounts.',
     annotations: { title: 'Get User Info', ...READ_ANNOTATIONS },
     inputSchema: {
@@ -825,6 +1002,7 @@ const TOOLS = [
 
   {
     name: 'github_create_issue',
+    title: 'Create Issue',
     description: 'Create a new issue in a GitHub repository. Requires a title; optionally set body (Markdown), labels, assignees, and milestone. Returns the created issue number and URL. Requires "repo" token scope.',
     annotations: {
       title: 'Create Issue',
@@ -867,7 +1045,35 @@ const TOOLS = [
     }
   },
   {
+    name: 'github_update_issue',
+    title: 'Update Issue',
+    description: 'Update an issue (or pull request) via the Issues API (edit title/body/state/labels/assignees/milestone).',
+    annotations: {
+      title: 'Update Issue',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        issue_number: { type: 'number', description: 'Issue number (or PR number) to update' },
+        title: { type: 'string', description: 'New title' },
+        body: { type: 'string', description: 'New body (GitHub-flavored Markdown)' },
+        state: { type: 'string', enum: ['open', 'closed'], description: 'Open or close the issue' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Set label names (overwrites existing labels)' },
+        assignees: { type: 'array', items: { type: 'string' }, description: 'Set assignees (overwrites existing assignees)' },
+        milestone: { type: ['number', 'null'], description: 'Milestone number, or null to clear' },
+      },
+      required: ['repo_url', 'issue_number'],
+      additionalProperties: false,
+    }
+  },
+  {
     name: 'github_create_issue_comment',
+    title: 'Comment on Issue/PR',
     description: 'Add a comment to an existing issue or pull request. Body supports GitHub-flavored Markdown. Works for both issues and PRs (they share the same comment API). Returns the comment ID and URL.',
     annotations: {
       title: 'Comment on Issue/PR',
@@ -896,7 +1102,193 @@ const TOOLS = [
     }
   },
   {
+    name: 'github_create_pull_request',
+    title: 'Create Pull Request',
+    description: 'Create a pull request in a repository.',
+    annotations: {
+      title: 'Create Pull Request',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        title: { type: 'string', description: 'Pull request title' },
+        head: { type: 'string', description: 'Head branch (or "owner:branch")' },
+        base: { type: 'string', description: 'Base branch name' },
+        body: { type: 'string', description: 'Pull request body (Markdown)' },
+        draft: { type: 'boolean', description: 'Create as draft pull request', default: false },
+      },
+      required: ['repo_url', 'title', 'head', 'base'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_update_pull_request',
+    title: 'Update Pull Request',
+    description: 'Update a pull request (title/body/state/base).',
+    annotations: {
+      title: 'Update Pull Request',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        pull_number: { type: 'number', description: 'Pull request number' },
+        title: { type: 'string', description: 'New title' },
+        body: { type: 'string', description: 'New body (Markdown)' },
+        state: { type: 'string', enum: ['open', 'closed'], description: 'Open or close the pull request' },
+        base: { type: 'string', description: 'Change the base branch' },
+      },
+      required: ['repo_url', 'pull_number'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_merge_pull_request',
+    title: 'Merge Pull Request',
+    description: 'Merge a pull request.',
+    annotations: {
+      title: 'Merge Pull Request',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        pull_number: { type: 'number', description: 'Pull request number' },
+        commit_title: { type: 'string', description: 'Title for the merge commit message' },
+        commit_message: { type: 'string', description: 'Extra detail to append to merge commit message' },
+        sha: { type: 'string', description: 'SHA that pull request head must match to allow merge' },
+        merge_method: { type: 'string', enum: ['merge', 'squash', 'rebase'], description: 'Merge method' },
+      },
+      required: ['repo_url', 'pull_number'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_list_labels',
+    title: 'List Labels',
+    description: 'List labels in a GitHub repository.',
+    annotations: { title: 'List Labels', ...READ_ANNOTATIONS },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        per_page: { type: 'number', description: 'Results per page (max 100).', default: 100 },
+        detail_level: {
+          type: 'string',
+          enum: ['summary', 'detailed'],
+          description: 'Response detail level.',
+          default: 'summary'
+        }
+      },
+      required: ['repo_url'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_create_label',
+    title: 'Create Label',
+    description: 'Create a new label in a GitHub repository.',
+    annotations: {
+      title: 'Create Label',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        name: { type: 'string', description: 'Label name' },
+        color: { type: 'string', description: 'Label color without leading # (e.g., "f29513")' },
+        description: { type: 'string', description: 'Label description' },
+      },
+      required: ['repo_url', 'name', 'color'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_set_issue_labels',
+    title: 'Set Issue Labels',
+    description: 'Replace all labels for an issue or pull request.',
+    annotations: {
+      title: 'Set Issue Labels',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        issue_number: { type: 'number', description: 'Issue or pull request number' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Label names to set (replaces existing)' },
+      },
+      required: ['repo_url', 'issue_number', 'labels'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_add_issue_labels',
+    title: 'Add Issue Labels',
+    description: 'Add labels to an issue or pull request.',
+    annotations: {
+      title: 'Add Issue Labels',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        issue_number: { type: 'number', description: 'Issue or pull request number' },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Label names to add' },
+      },
+      required: ['repo_url', 'issue_number', 'labels'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_remove_issue_label',
+    title: 'Remove Issue Label',
+    description: 'Remove a label from an issue or pull request.',
+    annotations: {
+      title: 'Remove Issue Label',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        issue_number: { type: 'number', description: 'Issue or pull request number' },
+        name: { type: 'string', description: 'Label name to remove' },
+      },
+      required: ['repo_url', 'issue_number', 'name'],
+      additionalProperties: false,
+    }
+  },
+  {
     name: 'github_create_or_update_file',
+    title: 'Create or Update File',
     description: 'Create a new file or update an existing file in a GitHub repository via a direct commit. For updates, you MUST provide the current file SHA (get it from github_get_file_content). Content should be the full file text (not a diff). Creates a commit on the specified branch.',
     annotations: {
       title: 'Create or Update File',
@@ -937,7 +1329,46 @@ const TOOLS = [
     }
   },
   {
+    name: 'github_delete_file',
+    title: 'Delete File',
+    description: 'Delete a file via the GitHub Contents API. Requires the current file SHA.',
+    annotations: {
+      title: 'Delete File',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: { type: 'string', description: 'Full GitHub repository URL' },
+        path: { type: 'string', description: 'File path in the repo (e.g., "src/config.json")' },
+        message: { type: 'string', description: 'Git commit message' },
+        sha: { type: 'string', description: 'Blob SHA of the file being deleted' },
+        branch: { type: 'string', description: 'Branch name. Defaults to the default branch.' },
+        committer: {
+          type: 'object',
+          description: 'Committer info (requires name and email if provided).',
+          properties: { name: { type: 'string' }, email: { type: 'string' } },
+          required: ['name', 'email'],
+          additionalProperties: false,
+        },
+        author: {
+          type: 'object',
+          description: 'Author info (requires name and email if provided).',
+          properties: { name: { type: 'string' }, email: { type: 'string' } },
+          required: ['name', 'email'],
+          additionalProperties: false,
+        },
+      },
+      required: ['repo_url', 'path', 'message', 'sha'],
+      additionalProperties: false,
+    }
+  },
+  {
     name: 'github_create_branch',
+    title: 'Create Branch',
     description: 'Create a new branch in a GitHub repository from an existing ref. Resolves the source ref to a commit SHA, then creates the branch. Use before github_create_or_update_file for safe changes on a separate branch.',
     annotations: {
       title: 'Create Branch',
@@ -965,13 +1396,181 @@ const TOOLS = [
       required: ['repo_url', 'branch_name']
     }
   },
+
+  // ── Escape Hatch REST Tools ───────────────────────────────────────────────
+  {
+    name: 'github_rest_get',
+    title: 'GitHub REST GET',
+    description: 'Perform an arbitrary GET request against the GitHub REST API (path-based).',
+    annotations: { title: 'GitHub REST GET', ...READ_ANNOTATIONS },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'API path starting with "/" (e.g., "/user").' },
+        query: { type: 'object', description: 'Query parameters (string -> string).', additionalProperties: { type: 'string' } },
+        accept: { type: 'string', description: 'Override Accept header.' },
+        api_version: { type: 'string', description: 'Override X-GitHub-Api-Version header.', default: '2022-11-28' },
+        detail_level: { type: 'string', enum: ['summary', 'detailed'], default: 'summary' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    }
+  },
+  {
+    name: 'github_rest_mutate',
+    title: 'GitHub REST Mutate',
+    description: 'Perform an arbitrary write request against the GitHub REST API (guarded by an explicit confirmation string).',
+    annotations: {
+      title: 'GitHub REST Mutate',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', enum: ['POST', 'PUT', 'PATCH', 'DELETE'], description: 'HTTP method.' },
+        path: { type: 'string', description: 'API path starting with "/" (e.g., "/repos/{owner}/{repo}/hooks").' },
+        query: { type: 'object', description: 'Query parameters (string -> string).', additionalProperties: { type: 'string' } },
+        body: { type: 'object', description: 'JSON body (object).', additionalProperties: true },
+        accept: { type: 'string', description: 'Override Accept header.' },
+        api_version: { type: 'string', description: 'Override X-GitHub-Api-Version header.', default: '2022-11-28' },
+        confirm: { type: 'string', description: 'Must be exactly "CONFIRM_GITHUB_WRITE".' },
+      },
+      required: ['method', 'path', 'confirm'],
+      additionalProperties: false,
+    }
+  },
 ];
+
+const ALL_TOOLS_BY_NAME = new Map(TOOL_DEFS.map(t => [t.name, t]));
+
+const TOOL_GROUPS = {
+  core: {
+    title: 'Core Repository Tools',
+    description: 'Repository exploration and file reading.',
+    toolNames: ['github_repo_info', 'github_list_contents', 'github_get_file_content', 'github_get_readme'],
+  },
+  search: {
+    title: 'Search Tools',
+    description: 'Search code, repositories, issues, and pull requests.',
+    toolNames: ['github_search_code', 'github_search_repos', 'github_search_issues'],
+  },
+  issues: {
+    title: 'Issues Tools',
+    description: 'List/get/create/update issues and manage issue labels.',
+    toolNames: [
+      'github_list_issues', 'github_get_issue', 'github_create_issue', 'github_create_issue_comment', 'github_update_issue',
+      'github_list_labels', 'github_create_label', 'github_set_issue_labels', 'github_add_issue_labels', 'github_remove_issue_label',
+    ],
+  },
+  pulls: {
+    title: 'Pull Requests Tools',
+    description: 'List/get/create/update/merge pull requests.',
+    toolNames: [
+      'github_list_pulls', 'github_get_pull',
+      'github_create_pull_request', 'github_update_pull_request', 'github_merge_pull_request',
+    ],
+  },
+  branches_commits: {
+    title: 'Branches and Commits',
+    description: 'List branches/commits, compare refs, and create branches.',
+    toolNames: ['github_list_branches', 'github_list_commits', 'github_get_commit', 'github_compare', 'github_create_branch'],
+  },
+  releases_users: {
+    title: 'Releases and Users',
+    description: 'Releases and user/org profile info.',
+    toolNames: ['github_list_releases', 'github_user_info', 'github_list_repos'],
+  },
+  files_write: {
+    title: 'File Write Tools',
+    description: 'Create/update/delete files via commits.',
+    toolNames: ['github_create_or_update_file', 'github_delete_file'],
+  },
+  rest: {
+    title: 'REST Escape Hatch',
+    description: 'Generic GitHub REST GET and guarded write tool.',
+    toolNames: ['github_rest_get', 'github_rest_mutate'],
+  },
+};
+
+const BOOTSTRAP_TOOL_NAMES = new Set([
+  'github_tool_groups_list',
+  'github_tool_groups_load',
+  'github_tool_catalog_search',
+]);
+
+const TOOL_TO_GROUP = (() => {
+  const m = new Map();
+  for (const [groupId, group] of Object.entries(TOOL_GROUPS)) {
+    for (const toolName of group.toolNames) {
+      if (!m.has(toolName)) m.set(toolName, groupId);
+    }
+  }
+  return m;
+})();
+
+const loadedGroups = new Set(PRELOAD_GROUPS);
+
+function getListedToolNames() {
+  if (TOOL_MODE !== 'lazy') {
+    return Array.from(ALL_TOOLS_BY_NAME.keys());
+  }
+
+  const out = new Set(BOOTSTRAP_TOOL_NAMES);
+  for (const groupId of loadedGroups) {
+    const group = TOOL_GROUPS[groupId];
+    if (!group) continue;
+    for (const toolName of group.toolNames) out.add(toolName);
+  }
+  return Array.from(out);
+}
+
+function getListedTools() {
+  const listedNames = new Set(getListedToolNames());
+  const tools = [];
+  for (const name of listedNames) {
+    const tool = ALL_TOOLS_BY_NAME.get(name);
+    if (!tool) continue;
+
+    if (TOOL_SCHEMA_VERBOSITY !== 'compact') {
+      tools.push(tool);
+      continue;
+    }
+
+    // Compact mode: keep schema intact but trim descriptions and avoid title duplication in annotations.
+    const compact = { ...tool };
+    if (typeof compact.description === 'string') {
+      compact.description = compact.description.split('\n')[0].trim();
+      if (compact.description.length > 220) compact.description = `${compact.description.slice(0, 217)}...`;
+    }
+    if (compact.annotations && typeof compact.annotations === 'object') {
+      compact.annotations = { ...compact.annotations };
+      delete compact.annotations.title;
+    }
+    tools.push(compact);
+  }
+
+  // Stable order in tool listings.
+  tools.sort((a, b) => a.name.localeCompare(b.name));
+  return tools;
+}
+
+function ensureToolAccessible(toolName) {
+  if (TOOL_MODE !== 'lazy') return { ok: true };
+  if (BOOTSTRAP_TOOL_NAMES.has(toolName)) return { ok: true };
+  const listed = new Set(getListedToolNames());
+  if (listed.has(toolName)) return { ok: true };
+  const groupId = TOOL_TO_GROUP.get(toolName);
+  return { ok: false, groupId };
+}
 
 // ─── Request Handlers ───────────────────────────────────────────────────────────
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   noteActivity();
-  return { tools: TOOLS };
+  return { tools: getListedTools() };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -979,10 +1578,92 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    const toolDef = ALL_TOOLS_BY_NAME.get(name);
+    if (!toolDef) {
+      return toolError(`Unknown tool: ${name}`);
+    }
+
+    const access = ensureToolAccessible(name);
+    if (!access.ok) {
+      const groupId = access.groupId || 'unknown';
+      return toolError(
+        `Tool '${name}' is not currently available in tool-mode=lazy. Load group '${groupId}' via github_tool_groups_load.`,
+        { tool: name, required_group: groupId }
+      );
+    }
+
     let result;
     const detailLevel = args.detail_level || 'summary';
 
     switch (name) {
+
+      // ── Lazy Tool Discovery Bootstrap ─────────────────────────────────────
+
+      case 'github_tool_groups_list': {
+        const groups = Object.entries(TOOL_GROUPS).map(([id, g]) => ({
+          id,
+          title: g.title,
+          description: g.description,
+          loaded: TOOL_MODE === 'lazy' ? loadedGroups.has(id) : true,
+          tool_count: g.toolNames.length,
+        }));
+        result = { groups };
+        break;
+      }
+
+      case 'github_tool_groups_load': {
+        if (!Array.isArray(args.groups) || args.groups.length === 0) {
+          return toolError("Parameter 'groups' must be a non-empty array of group IDs.");
+        }
+        const loaded = [];
+        const unknown = [];
+        for (const id of args.groups) {
+          if (typeof id !== 'string' || id.trim() === '') continue;
+          const groupId = id.trim();
+          if (!TOOL_GROUPS[groupId]) {
+            unknown.push(groupId);
+            continue;
+          }
+          if (TOOL_MODE === 'lazy') loadedGroups.add(groupId);
+          loaded.push(groupId);
+        }
+        try {
+          await server.sendToolListChanged();
+        } catch {
+          // If the client doesn't support notifications, this is still useful via tools/list polling.
+        }
+        result = { loaded, unknown };
+        break;
+      }
+
+      case 'github_tool_catalog_search': {
+        if (!args.query) return toolError("Parameter 'query' is required.");
+        const q = String(args.query).toLowerCase();
+        const groupMatches = [];
+        const toolMatches = [];
+        for (const [id, g] of Object.entries(TOOL_GROUPS)) {
+          const hay = `${id} ${g.title} ${g.description}`.toLowerCase();
+          if (hay.includes(q)) {
+            groupMatches.push({ id, title: g.title, description: g.description, loaded: loadedGroups.has(id) });
+          }
+          for (const toolName of g.toolNames) {
+            const t = ALL_TOOLS_BY_NAME.get(toolName);
+            if (!t) continue;
+            const th = `${toolName} ${t.title || ''} ${t.description || ''}`.toLowerCase();
+            if (th.includes(q)) {
+              toolMatches.push({
+                name: toolName,
+                title: t.title,
+                description: typeof t.description === 'string' ? t.description.split('\n')[0] : undefined,
+                group: id,
+              });
+            }
+          }
+        }
+        toolMatches.sort((a, b) => a.name.localeCompare(b.name));
+        result = { groups: groupMatches, tools: toolMatches.slice(0, 50) };
+        break;
+      }
 
       // ── Repository Operations ────────────────────────────────────────────
 
@@ -1115,6 +1796,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       }
 
+      case 'github_search_issues': {
+        if (!args.query) throw new Error("Parameter 'query' is required.");
+        const params = new URLSearchParams();
+        params.set('q', args.query);
+        params.set('per_page', String(args.per_page || 30));
+        const searchResponse = await fetchJson(`${API_BASE_URL}/search/issues?${params.toString()}`);
+        result = searchResponse.items || [];
+        break;
+      }
+
       // ── Issues & Pull Requests ───────────────────────────────────────────
 
       case 'github_list_issues': {
@@ -1228,6 +1919,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       }
 
+      case 'github_update_issue': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.title !== undefined) body.title = args.title;
+        if (args.body !== undefined) body.body = args.body;
+        if (args.state !== undefined) body.state = args.state;
+        if (args.labels !== undefined) body.labels = args.labels;
+        if (args.assignees !== undefined) body.assignees = args.assignees;
+        if (args.milestone !== undefined) body.milestone = args.milestone;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}`,
+          'PATCH',
+          body
+        );
+        break;
+      }
+
       case 'github_create_issue_comment': {
         if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
         if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
@@ -1236,6 +1946,110 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await fetchWithBody(
           `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/comments`,
           'POST', { body: args.body }
+        );
+        break;
+      }
+
+      case 'github_create_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.title) throw new Error("Parameter 'title' is required.");
+        if (!args.head) throw new Error("Parameter 'head' is required.");
+        if (!args.base) throw new Error("Parameter 'base' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {
+          title: args.title,
+          head: args.head,
+          base: args.base,
+        };
+        if (args.body) body.body = args.body;
+        if (args.draft !== undefined) body.draft = !!args.draft;
+        result = await fetchWithBody(`${API_BASE_URL}/repos/${owner}/${repo}/pulls`, 'POST', body);
+        break;
+      }
+
+      case 'github_update_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.pull_number == null) throw new Error("Parameter 'pull_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.title !== undefined) body.title = args.title;
+        if (args.body !== undefined) body.body = args.body;
+        if (args.state !== undefined) body.state = args.state;
+        if (args.base !== undefined) body.base = args.base;
+        result = await fetchWithBody(`${API_BASE_URL}/repos/${owner}/${repo}/pulls/${args.pull_number}`, 'PATCH', body);
+        break;
+      }
+
+      case 'github_merge_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.pull_number == null) throw new Error("Parameter 'pull_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.commit_title !== undefined) body.commit_title = args.commit_title;
+        if (args.commit_message !== undefined) body.commit_message = args.commit_message;
+        if (args.sha !== undefined) body.sha = args.sha;
+        if (args.merge_method !== undefined) body.merge_method = args.merge_method;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/pulls/${args.pull_number}/merge`,
+          'PUT',
+          body
+        );
+        break;
+      }
+
+      case 'github_list_labels': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const perPage = Math.min(Math.max(1, Number(args.per_page || 100)), 100);
+        result = await fetchAllItems(`${API_BASE_URL}/repos/${owner}/${repo}/labels?per_page=${perPage}`);
+        break;
+      }
+
+      case 'github_create_label': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.name) throw new Error("Parameter 'name' is required.");
+        if (!args.color) throw new Error("Parameter 'color' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = { name: args.name, color: args.color };
+        if (args.description !== undefined) body.description = args.description;
+        result = await fetchWithBody(`${API_BASE_URL}/repos/${owner}/${repo}/labels`, 'POST', body);
+        break;
+      }
+
+      case 'github_set_issue_labels': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        if (!Array.isArray(args.labels)) throw new Error("Parameter 'labels' is required and must be an array.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/labels`,
+          'PUT',
+          args.labels
+        );
+        break;
+      }
+
+      case 'github_add_issue_labels': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        if (!Array.isArray(args.labels)) throw new Error("Parameter 'labels' is required and must be an array.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/labels`,
+          'POST',
+          args.labels
+        );
+        break;
+      }
+
+      case 'github_remove_issue_label': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        if (!args.name) throw new Error("Parameter 'name' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchJson(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/labels/${encodeURIComponent(args.name)}`,
+          { method: 'DELETE' }
         );
         break;
       }
@@ -1256,6 +2070,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await fetchWithBody(
           `${API_BASE_URL}/repos/${owner}/${repo}/contents/${encodeURIComponent(cleanPath)}`,
           'PUT', body
+        );
+        break;
+      }
+
+      case 'github_delete_file': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.path) throw new Error("Parameter 'path' is required.");
+        if (!args.message) throw new Error("Parameter 'message' is required.");
+        if (!args.sha) throw new Error("Parameter 'sha' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const cleanPath = args.path.replace(/^\/+/, '');
+        const body = { message: args.message, sha: args.sha };
+        if (args.branch) body.branch = args.branch;
+        if (args.committer) body.committer = args.committer;
+        if (args.author) body.author = args.author;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/contents/${encodeURIComponent(cleanPath)}`,
+          'DELETE',
+          body
         );
         break;
       }
@@ -1301,6 +2134,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       }
 
+      case 'github_rest_get': {
+        if (!args.path) throw new Error("Parameter 'path' is required.");
+        const url = buildApiUrl(args.path, args.query);
+        const headers = {};
+        if (args.accept) headers.Accept = args.accept;
+        headers['X-GitHub-Api-Version'] = args.api_version || '2022-11-28';
+        result = await fetchJson(url, { headers });
+        break;
+      }
+
+      case 'github_rest_mutate': {
+        if (!args.confirm) throw new Error("Parameter 'confirm' is required.");
+        if (args.confirm !== 'CONFIRM_GITHUB_WRITE') {
+          return toolError(
+            "Refusing to run github_rest_mutate without explicit confirmation. Set confirm to exactly 'CONFIRM_GITHUB_WRITE'."
+          );
+        }
+        if (!args.method) throw new Error("Parameter 'method' is required.");
+        if (!args.path) throw new Error("Parameter 'path' is required.");
+        const url = buildApiUrl(args.path, args.query);
+        const headers = {};
+        if (args.accept) headers.Accept = args.accept;
+        headers['X-GitHub-Api-Version'] = args.api_version || '2022-11-28';
+        const body = args.body || {};
+        result = await fetchWithBody(url, args.method, body, { headers });
+        break;
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -1311,22 +2172,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       'github_get_issue', 'github_get_pull', 'github_get_commit',
       'github_create_issue', 'github_create_issue_comment',
       'github_create_or_update_file', 'github_create_branch',
+      'github_update_issue',
+      'github_create_pull_request', 'github_update_pull_request', 'github_merge_pull_request',
+      'github_list_labels', 'github_create_label', 'github_set_issue_labels', 'github_add_issue_labels', 'github_remove_issue_label',
+      'github_delete_file',
+      'github_rest_get', 'github_rest_mutate',
+      'github_tool_groups_list', 'github_tool_groups_load', 'github_tool_catalog_search',
     ];
     const finalResult = skipSummarize.includes(name)
       ? result
       : summarize(result, detailLevel);
 
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(finalResult, null, 2),
-      }],
-    };
+    return toolResultFromJson(finalResult);
   } catch (error) {
-    throw new McpError(
-      ErrorCode.InternalError,
-      `GitHub MCP Server Error: ${error.message}`
-    );
+    return toolError(error.message || String(error));
   }
 });
 
@@ -1396,7 +2255,7 @@ async function main() {
   }
 
   await server.connect(transport);
-  console.error('GitHub MCP Server v2.0.2 running on stdio');
+  console.error('GitHub MCP Server v2.1.0 running on stdio');
 }
 
 main().catch((error) => {

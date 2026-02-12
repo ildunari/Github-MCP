@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server providing comprehensive GitHub repository operations — read and write — through a simple CLI interface. Built for Claude Desktop and other MCP clients.
 
-**v2.0.2** — Adds deterministic shutdown on stdio close/signals and an idle timeout (defaults to 5 minutes; configurable via `MCP_IDLE_TIMEOUT_MS`) to help prevent leaked sessions. Also supports `GITHUB_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` env vars to avoid passing tokens on argv.
+**v2.1.0** — Adds optional lazy tool loading (tool groups + `notifications/tools/list_changed`) to reduce context usage, expands write coverage (PR create/update/merge, issue updates, labels, file delete), and adds guarded generic REST tools (`github_rest_get`, `github_rest_mutate`).
 
 ## Features
 
@@ -52,7 +52,7 @@ GITHUB_TOKEN=your_token_here github-mcp-server-kosta
 npx github-mcp-server-kosta --github-token ghp_your_token_here
 ```
 
-## Available Tools (21)
+## Available Tools
 
 ### Repository Operations
 | Tool | Description |
@@ -73,7 +73,12 @@ npx github-mcp-server-kosta --github-token ghp_your_token_here
 | `github_list_pulls` | List PRs (filter by state, head, base branch) |
 | `github_get_pull` | Get full PR details with diff stats |
 | `github_create_issue` | Create a new issue |
+| `github_update_issue` | Update an issue (or PR) via Issues API (title/body/state/labels/assignees/milestone) |
 | `github_create_issue_comment` | Comment on an issue or PR |
+| `github_create_pull_request` | Create a pull request |
+| `github_update_pull_request` | Update a pull request |
+| `github_merge_pull_request` | Merge a pull request |
+| `github_search_issues` | Search issues and pull requests (GitHub search syntax) |
 
 ### Branches, Commits & History
 | Tool | Description |
@@ -94,6 +99,29 @@ npx github-mcp-server-kosta --github-token ghp_your_token_here
 | Tool | Description |
 |------|-------------|
 | `github_create_or_update_file` | Create or update a file via commit |
+| `github_delete_file` | Delete a file via commit (requires SHA) |
+
+### Labels
+| Tool | Description |
+|------|-------------|
+| `github_list_labels` | List repository labels |
+| `github_create_label` | Create a repository label |
+| `github_set_issue_labels` | Replace all labels on an issue/PR |
+| `github_add_issue_labels` | Add labels to an issue/PR |
+| `github_remove_issue_label` | Remove a label from an issue/PR |
+
+### Lazy Tool Loading (Optional)
+| Tool | Description |
+|------|-------------|
+| `github_tool_groups_list` | List tool groups and whether they are loaded |
+| `github_tool_groups_load` | Load tool groups and emit `notifications/tools/list_changed` |
+| `github_tool_catalog_search` | Search groups/tool names without loading all tools |
+
+### REST Escape Hatch
+| Tool | Description |
+|------|-------------|
+| `github_rest_get` | Generic GET against GitHub REST API (path-based) |
+| `github_rest_mutate` | Generic write request (POST/PUT/PATCH/DELETE) guarded by `confirm: "CONFIRM_GITHUB_WRITE"` |
 
 ## MCP Client Configuration
 
@@ -115,10 +143,19 @@ For Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.
 ```
 Options:
   -t, --github-token     GitHub access token for API requests (or set GITHUB_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN)
+      --tool-mode        Tool listing mode: "full" or "lazy" [default: full]
+      --preload-groups   Comma-separated tool group IDs to preload in lazy mode [default: core,search in lazy]
+      --tool-schema-verbosity  Tool schema verbosity: "full" or "compact" [default: full]
       --idle-timeout-ms  Exit after this many ms without receiving an MCP request (0 disables). [default: 300000]
   -r, --rate-limit       Rate limit delay in ms between requests [default: 100]
   -h, --help             Show help
 ```
+
+### Lazy Tool Loading Notes
+
+- In `--tool-mode lazy`, the server only exposes bootstrap tools plus any preloaded groups (default: `core,search`).
+- Load additional groups at runtime using `github_tool_groups_load` (e.g., `issues`, `pulls`, `rest`).
+- The server advertises `tools.listChanged: true` and emits `notifications/tools/list_changed` after loading groups, but some MCP clients may not auto-refresh tool lists. If your client does not, call `tools/list` again (or restart the session).
 
 ## Response Formats
 

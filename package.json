@@ -1,6 +1,6 @@
 {
   "name": "github-mcp-server-kosta",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "MCP server for GitHub repository operations with CLI token support",
   "main": "src/index.js",
   "type": "module",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --inspect src/index.js",
-    "test": "node src/index.js --github-token test-token --help"
+    "test": "node --test"
   },
   "keywords": [
     "mcp",
