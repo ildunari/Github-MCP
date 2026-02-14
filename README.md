@@ -2,16 +2,19 @@
 
 A Model Context Protocol (MCP) server providing comprehensive GitHub repository operations — read and write — through a simple CLI interface. Built for Claude Desktop and other MCP clients.
 
-**v2.0.2** — Adds deterministic shutdown on stdio close/signals and an idle timeout (defaults to 5 minutes; configurable via `MCP_IDLE_TIMEOUT_MS`) to help prevent leaked sessions. Also supports `GITHUB_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` env vars to avoid passing tokens on argv.
+**v3.0.0** — Major write tools expansion (21 → 33 tools). Adds full PR lifecycle (create, update, merge, request reviewers), issue management (update, label, close), file/branch deletion, releases, repo creation, and forking. Includes deterministic shutdown, idle timeout, and env var token support.
 
 ## Features
 
 - Repository exploration, file reading, and code search
-- Issues and pull requests (list, view, create, comment)
+- Full PR lifecycle: create, update, merge, request reviewers
+- Issues: create, update, close, label management, comment
 - Commit history, diffs, and branch comparison
-- File creation/updates via direct commits
-- Branch creation
-- Release and user info
+- File creation, updates, and deletion via direct commits
+- Branch creation and deletion (cleanup after merge)
+- Release creation with auto-generated notes
+- Repository creation and forking
+- User/org profile info
 - Tool annotations (readOnly, destructive hints) for smart AI tool selection
 - Server instructions for AI workflow guidance
 - Rate limiting and comprehensive error handling
@@ -43,57 +46,86 @@ GITHUB_TOKEN=your_token_here github-mcp-server-kosta
 
 1. Go to GitHub Settings → Developer settings → Personal access tokens
 2. Generate a new token (classic) with these scopes:
-   - `repo` (full access for private repos + write operations)
+   - `repo` (full access for private repos + all write operations)
    - `public_repo` (for public repositories, read-only)
    - `read:user` (for user information)
+   - `delete_repo` (only if you plan to delete repositories)
 3. Use the token with the CLI:
 
 ```bash
 npx github-mcp-server-kosta --github-token ghp_your_token_here
 ```
 
-## Available Tools (21)
+## Available Tools (33)
 
-### Repository Operations
-| Tool | Description |
-|------|-------------|
-| `github_repo_info` | Get repository metadata (stars, forks, language, etc.) |
-| `github_list_contents` | List files/directories at a path |
-| `github_get_file_content` | Read a file's content (returns SHA for updates) |
-| `github_get_readme` | Fetch and decode the README |
-| `github_search_code` | Search code within a repository |
-| `github_list_repos` | List repositories for a user/organization |
-| `github_search_repos` | Search repositories globally |
+### Repository Operations (9 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_repo_info` | Read | Get repository metadata (stars, forks, language, etc.) |
+| `github_list_contents` | Read | List files/directories at a path |
+| `github_get_file_content` | Read | Read a file's content (returns SHA for updates/deletes) |
+| `github_get_readme` | Read | Fetch and decode the README |
+| `github_search_code` | Read | Search code within a repository |
+| `github_list_repos` | Read | List repositories for a user/organization |
+| `github_search_repos` | Read | Search repositories globally |
+| `github_create_repo` | Write | Create a new repository (with optional README, .gitignore, license) |
+| `github_fork_repo` | Write | Fork a repository to your account or an organization |
 
-### Issues & Pull Requests
-| Tool | Description |
-|------|-------------|
-| `github_list_issues` | List issues (filter by state, labels, assignee) |
-| `github_get_issue` | Get full issue details |
-| `github_list_pulls` | List PRs (filter by state, head, base branch) |
-| `github_get_pull` | Get full PR details with diff stats |
-| `github_create_issue` | Create a new issue |
-| `github_create_issue_comment` | Comment on an issue or PR |
+### Issue Operations (6 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_list_issues` | Read | List issues (filter by state, labels, assignee) |
+| `github_get_issue` | Read | Get full issue details |
+| `github_create_issue` | Write | Create a new issue |
+| `github_update_issue` | Write | Update issue title, body, state, labels, assignees, milestone |
+| `github_add_labels` | Write | Add labels to an issue/PR without removing existing ones |
+| `github_remove_label` | Write | Remove a single label from an issue/PR |
 
-### Branches, Commits & History
-| Tool | Description |
-|------|-------------|
-| `github_list_branches` | List all branches |
-| `github_list_commits` | List commits (filter by path, author, date) |
-| `github_get_commit` | Get commit details with full diff |
-| `github_compare` | Compare two branches/tags/commits |
-| `github_create_branch` | Create a new branch from a ref |
+### Issue Comments (1 tool)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_create_issue_comment` | Write | Comment on an issue or PR |
 
-### Releases & Users
-| Tool | Description |
-|------|-------------|
-| `github_list_releases` | List releases with notes and assets |
-| `github_user_info` | Get user/org profile info |
+### Pull Request Operations (6 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_list_pulls` | Read | List PRs (filter by state, head, base branch) |
+| `github_get_pull` | Read | Get full PR details with diff stats |
+| `github_create_pull_request` | Write | Create a new pull request (supports drafts) |
+| `github_update_pull_request` | Write | Update PR title, body, state, or base branch |
+| `github_merge_pull_request` | Write | Merge a PR (merge, squash, or rebase) |
+| `github_request_reviewers` | Write | Request reviewers for a PR |
 
-### File Operations
-| Tool | Description |
-|------|-------------|
-| `github_create_or_update_file` | Create or update a file via commit |
+### Branch Operations (4 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_list_branches` | Read | List all branches |
+| `github_create_branch` | Write | Create a new branch from a ref |
+| `github_delete_branch` | Write | Delete a branch (cleanup after merge) |
+| `github_compare` | Read | Compare two branches/tags/commits |
+
+### Commit History (3 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_list_commits` | Read | List commits (filter by path, author, date) |
+| `github_get_commit` | Read | Get commit details with full diff |
+
+### File Operations (4 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_create_or_update_file` | Write | Create or update a file via commit |
+| `github_delete_file` | Write | Delete a file via commit (requires file SHA) |
+
+### Release Operations (2 tools)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_list_releases` | Read | List releases with notes and assets |
+| `github_create_release` | Write | Create a release (with auto-generated notes option) |
+
+### User Operations (1 tool)
+| Tool | R/W | Description |
+|------|-----|-------------|
+| `github_user_info` | Read | Get user/org profile info |
 
 ## MCP Client Configuration
 

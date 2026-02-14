@@ -81,7 +81,7 @@ const HEADERS = {
   'Authorization': `Bearer ${GITHUB_TOKEN}`,
   'Accept': 'application/vnd.github+json',
   'X-GitHub-Api-Version': '2022-11-28',
-  'User-Agent': 'GitHub-MCP-Server/2.0.2'
+  'User-Agent': 'GitHub-MCP-Server/3.0.0'
 };
 
 // ─── Helper Functions ───────────────────────────────────────────────────────────
@@ -186,6 +186,30 @@ async function fetchWithBody(url, method, body) {
   }
 }
 
+async function fetchDelete(url) {
+  try {
+    const response = await rateLimitedRequest(url, { method: 'DELETE' });
+    if (!response.ok) {
+      let errorBody = '';
+      try {
+        const errorData = await response.json();
+        errorBody = errorData.message || JSON.stringify(errorData);
+      } catch (e) {
+        try {
+          errorBody = await response.text();
+        } catch (textError) {
+          errorBody = '(Could not retrieve error body)';
+        }
+      }
+      throw new Error(`GitHub API Error ${response.status}: ${response.statusText}. ${errorBody}`);
+    }
+    if (response.status === 204) return { deleted: true };
+    return await response.json();
+  } catch (error) {
+    throw error;
+  }
+}
+
 async function fetchAllItems(initialUrl) {
   let items = [];
   let url = initialUrl;
@@ -269,23 +293,28 @@ function buildReadmeUrl(owner, repo, ref) {
 
 // ─── Server Instructions ────────────────────────────────────────────────────────
 
-const SERVER_INSTRUCTIONS = `GitHub MCP Server — provides read and write access to GitHub repositories via the GitHub REST API.
+const SERVER_INSTRUCTIONS = `GitHub MCP Server v3.0.0 — provides read and write access to GitHub repositories via the GitHub REST API. 33 tools (17 read, 16 write).
 
 Tool Relationships & Workflows:
 - Explore: github_repo_info → github_list_contents → github_get_file_content (overview → browse → read)
 - Quick context: github_get_readme for project understanding before diving into code
 - Search: github_search_code (within a repo) or github_search_repos (find repos globally)
 - Issues: github_list_issues → github_get_issue for details → github_create_issue_comment to respond
-- PRs: github_list_pulls → github_get_pull for details
+- Issue triage: github_list_issues → github_update_issue (close/label) or github_add_labels / github_remove_label for targeted changes
+- Full PR lifecycle: github_create_branch → github_create_or_update_file → github_create_pull_request → github_request_reviewers → github_merge_pull_request → github_delete_branch
+- PR management: github_list_pulls → github_get_pull → github_update_pull_request (edit/close/reopen)
 - History: github_list_commits → github_get_commit for specific change details
 - Branching: github_compare to diff branches → github_create_branch for safe changes → github_create_or_update_file to commit
-- File editing: github_get_file_content (get SHA) → github_create_or_update_file (update with SHA)
+- File editing: github_get_file_content (get SHA) → github_create_or_update_file (update with SHA) or github_delete_file (delete with SHA)
+- Releases: github_create_release with generate_release_notes: true for auto-generated changelogs
+- Repo setup: github_create_repo to create new repositories, github_fork_repo to fork before contributing upstream
 
 Rate Limiting: All requests have a configurable delay (default 100ms). GitHub API allows 5,000 requests/hour for authenticated users.
 
 Token Permissions:
 - Read operations: "repo" scope (or "public_repo" for public repos only)
-- Write operations (create issue/comment/file/branch): "repo" scope required
+- Write operations (issues, PRs, files, branches, releases): "repo" scope required
+- Repository creation: "repo" scope required
 - User info: "read:user" scope
 
 Response Modes: Most tools accept detail_level "summary" (default, concise) or "detailed" (full API response). Use "summary" to conserve tokens.`;
@@ -295,7 +324,7 @@ Response Modes: Most tools accept detail_level "summary" (default, concise) or "
 const server = new Server(
   {
     name: '@ildunari/github-mcp-server',
-    version: '2.0.2',
+    version: '3.0.0',
   },
   {
     capabilities: {
@@ -965,6 +994,492 @@ const TOOLS = [
       required: ['repo_url', 'branch_name']
     }
   },
+
+  // ── Tier 1: PR Lifecycle ────────────────────────────────────────────────
+
+  {
+    name: 'github_create_pull_request',
+    description: 'Create a new pull request. Specify head (branch with changes) and base (branch to merge into). Supports draft PRs. Completes the branch→commit→PR workflow started by github_create_branch and github_create_or_update_file. Requires "repo" token scope.',
+    annotations: {
+      title: 'Create Pull Request',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL (e.g., "https://github.com/owner/repo")'
+        },
+        title: {
+          type: 'string',
+          description: 'Pull request title'
+        },
+        head: {
+          type: 'string',
+          description: 'Branch containing changes (e.g., "feature/add-login")'
+        },
+        base: {
+          type: 'string',
+          description: 'Branch to merge into (e.g., "main")'
+        },
+        body: {
+          type: 'string',
+          description: 'PR description in GitHub-flavored Markdown'
+        },
+        draft: {
+          type: 'boolean',
+          description: 'Create as a draft pull request',
+          default: false
+        },
+        maintainer_can_modify: {
+          type: 'boolean',
+          description: 'Allow maintainers to push to the head branch',
+          default: true
+        }
+      },
+      required: ['repo_url', 'title', 'head', 'base']
+    }
+  },
+  {
+    name: 'github_update_pull_request',
+    description: 'Update an existing pull request. Edit title, body, state (open/closed), or base branch. Use to close/reopen PRs or update their description.',
+    annotations: {
+      title: 'Update Pull Request',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        pull_number: {
+          type: 'number',
+          description: 'The pull request number to update'
+        },
+        title: {
+          type: 'string',
+          description: 'New PR title'
+        },
+        body: {
+          type: 'string',
+          description: 'New PR description in Markdown'
+        },
+        state: {
+          type: 'string',
+          enum: ['open', 'closed'],
+          description: 'Set PR state to open or closed'
+        },
+        base: {
+          type: 'string',
+          description: 'Change the base branch'
+        }
+      },
+      required: ['repo_url', 'pull_number']
+    }
+  },
+  {
+    name: 'github_merge_pull_request',
+    description: 'Merge a pull request. Supports merge commit, squash, and rebase strategies. Optionally provide SHA for optimistic locking to ensure the PR head has not changed. Completes the PR lifecycle.',
+    annotations: {
+      title: 'Merge Pull Request',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        pull_number: {
+          type: 'number',
+          description: 'The pull request number to merge'
+        },
+        commit_title: {
+          type: 'string',
+          description: 'Custom merge commit title (defaults to PR title)'
+        },
+        commit_message: {
+          type: 'string',
+          description: 'Custom merge commit body'
+        },
+        merge_method: {
+          type: 'string',
+          enum: ['merge', 'squash', 'rebase'],
+          description: 'Merge strategy: "merge" (default), "squash", or "rebase"',
+          default: 'merge'
+        },
+        sha: {
+          type: 'string',
+          description: 'Expected HEAD SHA of the PR branch for optimistic locking. Merge fails if HEAD has changed.'
+        }
+      },
+      required: ['repo_url', 'pull_number']
+    }
+  },
+  {
+    name: 'github_request_reviewers',
+    description: 'Request reviewers for a pull request. Add individual users and/or team reviewers by slug. Use after creating a PR to kick off the review process.',
+    annotations: {
+      title: 'Request PR Reviewers',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        pull_number: {
+          type: 'number',
+          description: 'The pull request number'
+        },
+        reviewers: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of GitHub usernames to request as reviewers'
+        },
+        team_reviewers: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of team slugs to request as reviewers (e.g., ["frontend-team"])'
+        }
+      },
+      required: ['repo_url', 'pull_number']
+    }
+  },
+
+  // ── Tier 2: Issue Management ────────────────────────────────────────────
+
+  {
+    name: 'github_update_issue',
+    description: 'Update an existing issue. Edit title, body, state (open/closed), state_reason (completed/not_planned/reopened), labels, assignees, and milestone. Use to close issues, relabel, reassign, or edit content.',
+    annotations: {
+      title: 'Update Issue',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        issue_number: {
+          type: 'number',
+          description: 'The issue number to update'
+        },
+        title: {
+          type: 'string',
+          description: 'New issue title'
+        },
+        body: {
+          type: 'string',
+          description: 'New issue body in Markdown'
+        },
+        state: {
+          type: 'string',
+          enum: ['open', 'closed'],
+          description: 'Set issue state'
+        },
+        state_reason: {
+          type: 'string',
+          enum: ['completed', 'not_planned', 'reopened'],
+          description: 'Reason for state change. Use "completed" or "not_planned" when closing, "reopened" when reopening.'
+        },
+        labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Replace all labels with this list. Use github_add_labels or github_remove_label for incremental changes.'
+        },
+        assignees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Replace all assignees with this list of usernames'
+        },
+        milestone: {
+          type: ['number', 'null'],
+          description: 'Milestone number to set, or null to clear the milestone'
+        }
+      },
+      required: ['repo_url', 'issue_number']
+    }
+  },
+  {
+    name: 'github_add_labels',
+    description: 'Add one or more labels to an issue or pull request without removing existing labels. For quick triage without a full issue update. Labels must already exist in the repository.',
+    annotations: {
+      title: 'Add Labels',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        issue_number: {
+          type: 'number',
+          description: 'The issue or PR number to label'
+        },
+        labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Label names to add (e.g., ["bug", "priority:high"])'
+        }
+      },
+      required: ['repo_url', 'issue_number', 'labels']
+    }
+  },
+  {
+    name: 'github_remove_label',
+    description: 'Remove a single label from an issue or pull request. Returns the remaining labels. Use for targeted label removal without affecting other labels.',
+    annotations: {
+      title: 'Remove Label',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        issue_number: {
+          type: 'number',
+          description: 'The issue or PR number'
+        },
+        label: {
+          type: 'string',
+          description: 'Name of the label to remove'
+        }
+      },
+      required: ['repo_url', 'issue_number', 'label']
+    }
+  },
+
+  // ── Tier 3: File & Branch Cleanup ───────────────────────────────────────
+
+  {
+    name: 'github_delete_file',
+    description: 'Delete a file from a GitHub repository via a direct commit. Requires the current file SHA (from github_get_file_content) and a commit message. Creates a delete commit on the specified branch.',
+    annotations: {
+      title: 'Delete File',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        path: {
+          type: 'string',
+          description: 'File path to delete (e.g., "src/old-config.json")'
+        },
+        message: {
+          type: 'string',
+          description: 'Git commit message for the deletion (e.g., "Remove deprecated config")'
+        },
+        sha: {
+          type: 'string',
+          description: 'Current file SHA (required, get from github_get_file_content)'
+        },
+        branch: {
+          type: 'string',
+          description: 'Branch to commit to. Defaults to the default branch.'
+        }
+      },
+      required: ['repo_url', 'path', 'message', 'sha']
+    }
+  },
+  {
+    name: 'github_delete_branch',
+    description: 'Delete a branch from a GitHub repository. Typically used to clean up feature branches after a PR has been merged. Cannot delete the default branch.',
+    annotations: {
+      title: 'Delete Branch',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        branch_name: {
+          type: 'string',
+          description: 'Branch name to delete (e.g., "feature/old-feature"). Do not include "refs/heads/" prefix.'
+        }
+      },
+      required: ['repo_url', 'branch_name']
+    }
+  },
+
+  // ── Tier 4: Releases & Repo Management ─────────────────────────────────
+
+  {
+    name: 'github_create_release',
+    description: 'Create a new release in a GitHub repository. Tags a version, publishes release notes (manual or auto-generated from commits). Supports draft and pre-release flags.',
+    annotations: {
+      title: 'Create Release',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL'
+        },
+        tag_name: {
+          type: 'string',
+          description: 'Tag name for the release (e.g., "v3.0.0"). Creates the tag if it does not exist.'
+        },
+        name: {
+          type: 'string',
+          description: 'Release title (e.g., "v3.0.0 — Write Tools Expansion")'
+        },
+        body: {
+          type: 'string',
+          description: 'Release notes in Markdown'
+        },
+        target_commitish: {
+          type: 'string',
+          description: 'Branch name or commit SHA to tag. Defaults to the default branch.'
+        },
+        draft: {
+          type: 'boolean',
+          description: 'Create as a draft release (not published)',
+          default: false
+        },
+        prerelease: {
+          type: 'boolean',
+          description: 'Mark as a pre-release',
+          default: false
+        },
+        generate_release_notes: {
+          type: 'boolean',
+          description: 'Auto-generate release notes from commits since the last release',
+          default: false
+        }
+      },
+      required: ['repo_url', 'tag_name']
+    }
+  },
+  {
+    name: 'github_create_repo',
+    description: 'Create a new GitHub repository under the authenticated user\'s account. Optionally initialize with a README, .gitignore template, and license. Returns the new repository URL.',
+    annotations: {
+      title: 'Create Repository',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Repository name (e.g., "my-new-project")'
+        },
+        description: {
+          type: 'string',
+          description: 'Short description of the repository'
+        },
+        private: {
+          type: 'boolean',
+          description: 'Create as a private repository',
+          default: false
+        },
+        auto_init: {
+          type: 'boolean',
+          description: 'Initialize with a README.md',
+          default: false
+        },
+        gitignore_template: {
+          type: 'string',
+          description: 'Gitignore template name (e.g., "Node", "Python", "Java")'
+        },
+        license_template: {
+          type: 'string',
+          description: 'License template identifier (e.g., "mit", "apache-2.0", "gpl-3.0")'
+        }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'github_fork_repo',
+    description: 'Fork an existing GitHub repository to the authenticated user\'s account or a specified organization. Use before contributing upstream via pull requests.',
+    annotations: {
+      title: 'Fork Repository',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_url: {
+          type: 'string',
+          description: 'Full GitHub repository URL to fork (e.g., "https://github.com/owner/repo")'
+        },
+        organization: {
+          type: 'string',
+          description: 'Fork into this organization instead of your personal account'
+        },
+        name: {
+          type: 'string',
+          description: 'Custom name for the forked repository'
+        },
+        default_branch_only: {
+          type: 'boolean',
+          description: 'Only fork the default branch',
+          default: false
+        }
+      },
+      required: ['repo_url']
+    }
+  },
 ];
 
 // ─── Request Handlers ───────────────────────────────────────────────────────────
@@ -1301,6 +1816,199 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       }
 
+      // ── Tier 1: PR Lifecycle ──────────────────────────────────────────
+
+      case 'github_create_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.title) throw new Error("Parameter 'title' is required.");
+        if (!args.head) throw new Error("Parameter 'head' is required.");
+        if (!args.base) throw new Error("Parameter 'base' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {
+          title: args.title,
+          head: args.head,
+          base: args.base,
+        };
+        if (args.body) body.body = args.body;
+        if (args.draft != null) body.draft = args.draft;
+        if (args.maintainer_can_modify != null) body.maintainer_can_modify = args.maintainer_can_modify;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/pulls`,
+          'POST', body
+        );
+        break;
+      }
+
+      case 'github_update_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.pull_number == null) throw new Error("Parameter 'pull_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.title != null) body.title = args.title;
+        if (args.body != null) body.body = args.body;
+        if (args.state) body.state = args.state;
+        if (args.base) body.base = args.base;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/pulls/${args.pull_number}`,
+          'PATCH', body
+        );
+        break;
+      }
+
+      case 'github_merge_pull_request': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.pull_number == null) throw new Error("Parameter 'pull_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.commit_title) body.commit_title = args.commit_title;
+        if (args.commit_message) body.commit_message = args.commit_message;
+        if (args.merge_method) body.merge_method = args.merge_method;
+        if (args.sha) body.sha = args.sha;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/pulls/${args.pull_number}/merge`,
+          'PUT', body
+        );
+        break;
+      }
+
+      case 'github_request_reviewers': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.pull_number == null) throw new Error("Parameter 'pull_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.reviewers) body.reviewers = args.reviewers;
+        if (args.team_reviewers) body.team_reviewers = args.team_reviewers;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/pulls/${args.pull_number}/requested_reviewers`,
+          'POST', body
+        );
+        break;
+      }
+
+      // ── Tier 2: Issue Management ──────────────────────────────────────
+
+      case 'github_update_issue': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.title != null) body.title = args.title;
+        if (args.body != null) body.body = args.body;
+        if (args.state) body.state = args.state;
+        if (args.state_reason) body.state_reason = args.state_reason;
+        if (args.labels) body.labels = args.labels;
+        if (args.assignees) body.assignees = args.assignees;
+        if (args.milestone !== undefined) body.milestone = args.milestone;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}`,
+          'PATCH', body
+        );
+        break;
+      }
+
+      case 'github_add_labels': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        if (!args.labels || !args.labels.length) throw new Error("Parameter 'labels' is required and must not be empty.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/labels`,
+          'POST', { labels: args.labels }
+        );
+        break;
+      }
+
+      case 'github_remove_label': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (args.issue_number == null) throw new Error("Parameter 'issue_number' is required.");
+        if (!args.label) throw new Error("Parameter 'label' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchDelete(
+          `${API_BASE_URL}/repos/${owner}/${repo}/issues/${args.issue_number}/labels/${encodeURIComponent(args.label)}`
+        );
+        break;
+      }
+
+      // ── Tier 3: File & Branch Cleanup ─────────────────────────────────
+
+      case 'github_delete_file': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.path) throw new Error("Parameter 'path' is required.");
+        if (!args.message) throw new Error("Parameter 'message' is required.");
+        if (!args.sha) throw new Error("Parameter 'sha' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const cleanPath = args.path.replace(/^\/+/, '');
+        const body = {
+          message: args.message,
+          sha: args.sha,
+        };
+        if (args.branch) body.branch = args.branch;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/contents/${encodeURIComponent(cleanPath)}`,
+          'DELETE', body
+        );
+        break;
+      }
+
+      case 'github_delete_branch': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.branch_name) throw new Error("Parameter 'branch_name' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        result = await fetchDelete(
+          `${API_BASE_URL}/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(args.branch_name)}`
+        );
+        break;
+      }
+
+      // ── Tier 4: Releases & Repo Management ────────────────────────────
+
+      case 'github_create_release': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        if (!args.tag_name) throw new Error("Parameter 'tag_name' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = { tag_name: args.tag_name };
+        if (args.name) body.name = args.name;
+        if (args.body) body.body = args.body;
+        if (args.target_commitish) body.target_commitish = args.target_commitish;
+        if (args.draft != null) body.draft = args.draft;
+        if (args.prerelease != null) body.prerelease = args.prerelease;
+        if (args.generate_release_notes != null) body.generate_release_notes = args.generate_release_notes;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/releases`,
+          'POST', body
+        );
+        break;
+      }
+
+      case 'github_create_repo': {
+        if (!args.name) throw new Error("Parameter 'name' is required.");
+        const body = { name: args.name };
+        if (args.description) body.description = args.description;
+        if (args.private != null) body.private = args.private;
+        if (args.auto_init != null) body.auto_init = args.auto_init;
+        if (args.gitignore_template) body.gitignore_template = args.gitignore_template;
+        if (args.license_template) body.license_template = args.license_template;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/user/repos`,
+          'POST', body
+        );
+        break;
+      }
+
+      case 'github_fork_repo': {
+        if (!args.repo_url) throw new Error("Parameter 'repo_url' is required.");
+        const { owner, repo } = parseRepoUrl(args.repo_url);
+        const body = {};
+        if (args.organization) body.organization = args.organization;
+        if (args.name) body.name = args.name;
+        if (args.default_branch_only != null) body.default_branch_only = args.default_branch_only;
+        result = await fetchWithBody(
+          `${API_BASE_URL}/repos/${owner}/${repo}/forks`,
+          'POST', body
+        );
+        break;
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -1311,6 +2019,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       'github_get_issue', 'github_get_pull', 'github_get_commit',
       'github_create_issue', 'github_create_issue_comment',
       'github_create_or_update_file', 'github_create_branch',
+      'github_create_pull_request', 'github_update_pull_request',
+      'github_merge_pull_request', 'github_request_reviewers',
+      'github_update_issue', 'github_add_labels', 'github_remove_label',
+      'github_delete_file', 'github_delete_branch',
+      'github_create_release', 'github_create_repo', 'github_fork_repo',
     ];
     const finalResult = skipSummarize.includes(name)
       ? result
@@ -1396,7 +2109,7 @@ async function main() {
   }
 
   await server.connect(transport);
-  console.error('GitHub MCP Server v2.0.2 running on stdio');
+  console.error('GitHub MCP Server v3.0.0 running on stdio');
 }
 
 main().catch((error) => {
