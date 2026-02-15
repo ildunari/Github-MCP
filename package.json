@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --inspect src/index.js",
-    "test": "node src/index.js --github-token test-token --help"
+    "test": "node --test --test-concurrency=1"
   },
   "keywords": [
     "mcp",
