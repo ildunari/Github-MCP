@@ -159,7 +159,8 @@ Options:
       --tool-schema-verbosity  Tool schema verbosity: "full" or "compact" [default: full]
       --tool-output      Tool output: text|structured|both [default: text]
       --tool-output-schema  Tool output schema: none|bootstrap|all_loose [default: none]
-      --idle-timeout-ms  Exit after this many ms without receiving an MCP request (0 disables). [default: 300000]
+      --idle-timeout-ms  Exit after this many ms without receiving an MCP request (0 disables).
+                         Defaults: stdio=0, http=300000 (unless MCP_IDLE_TIMEOUT_MS is set)
   -r, --rate-limit       Rate limit delay in ms between requests [default: 100]
       --http-host        HTTP bind host (http transport) [default: 127.0.0.1]
       --http-port        HTTP bind port (http transport; 0 chooses ephemeral) [default: 3000]

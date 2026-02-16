@@ -7,6 +7,7 @@ import { hideBin } from 'yargs/helpers';
 
 import { createGithubServer } from './githubServerFactory.js';
 import { startHttpMcpServer } from './httpMcpServer.js';
+import { hasCliIdleTimeoutArg, resolveIdleTimeoutMs } from './idleTimeoutPolicy.js';
 
 const SERVER_VERSION = (() => {
   try {
@@ -18,15 +19,9 @@ const SERVER_VERSION = (() => {
   }
 })();
 
-function defaultIdleTimeoutMs() {
-  const raw = process.env.MCP_IDLE_TIMEOUT_MS;
-  if (raw === undefined) return 300_000; // 5 minutes: avoids leaking stdio servers forever by default.
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n : 300_000;
-}
-
 const rawArgv = hideBin(process.argv);
 const wantsHelp = rawArgv.includes('--help') || rawArgv.includes('-h');
+const idleTimeoutCliProvided = hasCliIdleTimeoutArg(rawArgv);
 
 const y = yargs(rawArgv)
   .option('github-token', {
@@ -72,8 +67,7 @@ const y = yargs(rawArgv)
   .option('idle-timeout-ms', {
     type: 'number',
     description:
-      'Exit after this many ms without receiving an MCP request (0 disables). In http mode this applies to idle sessions.',
-    default: defaultIdleTimeoutMs(),
+      'Exit after this many ms without receiving an MCP request (0 disables). Default: stdio=0, http=300000 unless MCP_IDLE_TIMEOUT_MS is set.',
   })
   .option('rate-limit', {
     alias: 'r',
@@ -193,8 +187,13 @@ const PRELOAD_GROUPS = (PRELOAD_GROUPS_RAW || DEFAULT_PRELOAD_GROUPS)
   .filter(Boolean);
 
 const RATE_LIMIT_DELAY = argv.rateLimit;
-const IDLE_TIMEOUT_MS = argv.idleTimeoutMs;
 const TRANSPORT = argv.transport || 'stdio';
+const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs({
+  transport: TRANSPORT,
+  cliProvided: idleTimeoutCliProvided,
+  cliValue: argv.idleTimeoutMs,
+  env: process.env,
+});
 
 function makeServer({ onActivity } = {}) {
   return createGithubServer({
