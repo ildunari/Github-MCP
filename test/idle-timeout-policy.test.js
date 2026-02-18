@@ -10,13 +10,13 @@ test('detects when --idle-timeout-ms is explicitly provided on CLI', () => {
   assert.equal(hasCliIdleTimeoutArg(['--idle-timeout-ms=900000']), true);
 });
 
-test('default idle timeout is 0 for stdio when not explicitly configured', () => {
+test('default idle timeout is 300000 for stdio when not explicitly configured', () => {
   const value = resolveIdleTimeoutMs({
     transport: 'stdio',
     cliProvided: false,
     env: {},
   });
-  assert.equal(value, 0);
+  assert.equal(value, 300000);
 });
 
 test('default idle timeout is 300000 for http when not explicitly configured', () => {

@@ -15,7 +15,7 @@ export function resolveIdleTimeoutMs({
   cliValue,
   env = process.env,
 } = {}) {
-  const defaultMs = transport === 'http' ? 300_000 : 0;
+  const defaultMs = 300_000;
 
   if (cliProvided) {
     return parseNonNegativeInt(cliValue) ?? defaultMs;
